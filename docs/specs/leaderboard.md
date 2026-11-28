@@ -35,6 +35,9 @@ adopted or rejected by the leaderboard; it orders the options.
 | `licensed` | the run is built on a licensed source (D21) |
 | `note` | free text, e.g. why a registry block was refused |
 | `descriptive` | a bool, default False: the row is a measurement shown on the board but given no D16 rank (below) |
+| `class_group`, `odds_band` | the row's stake-capacity cell beside its `pool`, or None (#491) |
+| `capacity` | the cell's capacity stake: (edge, quantile, yen) triples, yen +inf where own money never eats that share of the edge; `capacity_at(edge, quantile=0.5)` reads one |
+| `capacity_note` | why the row carries no capacity, or None |
 
 A row is checked on construction (`RowRefused`). A row is *measured* when `return_per_100` is set
 and *withheld* when it is marked licensed or its sources name JRDB or JRA-VAN in any spelling
@@ -51,6 +54,20 @@ walk-forward return per ¥100 staked on a selection rule, a follow-up of epic #4
 row keeps its value, bounds and n; `shrink` leaves it out of its pool's estimate and gives it no
 shrunk value; `rank` gives it no rank. A row file written before the flag existed reads as not
 descriptive.
+
+### Capacity (#491)
+
+Beside each row, whether the flat stake fits its pool before our own money eats half the edge:
+the capacity stake of #432's depth table (`docs/specs/pool-depth-prereg.md`) in the row's cell,
+pool x class group x odds band, at every edge (5, 10 and 20%) and quantile the table holds.
+`countries/japan/research/leaderboard_build.with_capacity` joins the rows to the tables that
+`pool-depth run` writes under the reports dir (`pool_depth.read_depth_tables`); a candidate cell
+names its cell by its `pool`, `class_group` and `odds_band`. A row with no capacity says why in
+`capacity_note`: no depth table yet; no class group or odds band named (a model, a registry rule,
+a cell of every class); a co-placer pool (Place, Wide: the table has no single-winner capacity);
+no such cell in the table; or a cell with no capacity figure. The capacity never ranks, shrinks
+or withholds a row. In the JSON an infinite stake is the string `"inf"`; a row file written
+before #491 reads with no capacity.
 
 ## Shrinkage and ranking
 
@@ -147,6 +164,10 @@ convention (#451 backfills them).
   and family only. The public variants total still counts withheld families, so the search the
   multiple-testing count discloses is not understated. The public Japan leaderboard is
   `docs/leaderboard/japan.md` (#452).
+- The Capacity column: privately the median capacity stake at each edge, or the row's capacity
+  note; publicly `withheld (D21)` for every row that carries a capacity (the depth table is
+  JRA-VAN), or the note. The flat stake it is read against is `flat_stake_yen` in
+  `countries/japan/config/betting.yaml`.
 
 ## D21
 

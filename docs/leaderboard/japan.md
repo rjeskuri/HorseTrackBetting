@@ -4,1376 +4,1582 @@ Written by `horsetrack.core.eval.leaderboard`; do not edit by hand.
 
 Rows rank by expected return per ¥100 staked at the final price, shrunk toward their pool's own mean (DerSimonian-Laird) or raw where a row has no standard error, highest first; rows with no measured return come last, unranked. Descriptive rows (a measurement that is not a return per ¥100 staked on a ticket, such as a pool-level value) are not ranked: they are left out of the shrinkage and shown with their value and bounds in their own section after the ranked table. Each CI bound is one-sided at the level shown.
 
-Variants searched in total: 6483 (each family's variants searched, its largest count across its rows, added over every family, withheld families included).
+Variants searched in total: 6763 (each family's variants searched, its largest count across its rows, added over every family, withheld families included).
+
+Capacity: in the row's pool, class group and odds band, the median stake at which our own money would eat the pool-depth study's share of each edge, from the final votes (a licensed source, so withheld (D21) in the public version); a row without one says why.
 
 Public version: rows built on JRDB or JRA-VAN, or marked licensed, are withheld (D21) and listed by option id below; every shrunk value and rank here is computed over the public rows alone.
 
-| Rank | Option | Kind | Pool | Segment | Selection | Return per ¥100 staked | CI | Shrunk | n | Variants searched | Sources |
-| ---: | --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- |
-| 1 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 2] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 2 | look_ahead | 95.14 | 91.56 to 98.73 (95%) | 93.23 | 3023 bets | 6 | jra |
-| 2 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 2] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 2 | look_ahead | 95.77 | 91.59 to 100.08 (95%) | 93.12 | 2032 bets | 6 | jra |
-| 3 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 2] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 2 | look_ahead | 94.80 | 90.51 to 99.24 (95%) | 92.20 | 1918 bets | 6 | jra |
-| 4 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 2] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 2 | look_ahead | 93.96 | 90.35 to 97.64 (95%) | 92.15 | 2818 bets | 6 | jra |
-| 5 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 2–3] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 2–3 | look_ahead | 92.59 | 89.47 to 95.73 (95%) | 91.35 | 5599 bets | 6 | jra |
-| 6 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 2–3] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 2–3 | look_ahead | 92.51 | 89.39 to 95.65 (95%) | 91.28 | 6011 bets | 6 | jra |
-| 7 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 2–3] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 2–3 | look_ahead | 92.60 | 88.86 to 96.38 (95%) | 90.89 | 3803 bets | 6 | jra |
-| 8 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 2–3] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 2–3 | look_ahead | 92.26 | 88.65 to 96.05 (95%) | 90.64 | 4035 bets | 6 | jra |
-| 9 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 2–3] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 2–3 | look_ahead | 93.03 | 87.03 to 98.98 (95%) | 89.36 | 1976 bets | 6 | jra |
-| 10 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 2] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 2 | look_ahead | 93.83 | 87.02 to 100.68 (95%) | 89.16 | 991 bets | 6 | jra |
-| 11 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 3] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 3 | look_ahead | 91.20 | 86.57 to 95.87 (95%) | 89.05 | 2781 bets | 6 | jra |
-| 12 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 2–3] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 2–3 | look_ahead | 92.57 | 86.77 to 98.73 (95%) | 89.03 | 1796 bets | 6 | jra |
-| 13 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 4–5] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 4–5 | look_ahead | 90.78 | 85.79 to 95.82 (95%) | 88.47 | 3802 bets | 6 | jra |
-| 14 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 2] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 2 | look_ahead | 92.18 | 85.50 to 99.07 (95%) | 88.12 | 900 bets | 6 | jra |
-| 15 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 3] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 3 | look_ahead | 89.85 | 85.31 to 94.44 (95%) | 88.04 | 2988 bets | 6 | jra |
-| 16 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 3] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 3 | look_ahead | 90.36 | 84.81 to 96.03 (95%) | 87.74 | 1885 bets | 6 | jra |
-| 17 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 4–5] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 4–5 | look_ahead | 89.58 | 84.66 to 94.58 (95%) | 87.57 | 4026 bets | 6 | jra |
-| 18 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 3] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 3 | look_ahead | 92.96 | 84.51 to 101.85 (95%) | 87.18 | 896 bets | 6 | jra |
-| 19 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 3] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 3 | look_ahead | 92.21 | 83.84 to 100.72 (95%) | 86.94 | 985 bets | 6 | jra |
-| 20 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 3] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 3 | look_ahead | 88.69 | 83.29 to 94.10 (95%) | 86.63 | 2003 bets | 6 | jra |
-| 21 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 2] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 2 | look_ahead | 85.96 | 84.34 to 87.56 (95%) | 85.81 | 8384 bets | 6 | jra |
-| 22 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 2] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 2 | look_ahead | 85.91 | 84.32 to 87.50 (95%) | 85.76 | 8676 bets | 6 | jra |
-| 23 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 6–8] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 6–8 | look_ahead | 87.31 | 80.91 to 94.09 (95%) | 85.06 | 5684 bets | 6 | jra |
-| 24 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 2–3] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 2–3 | look_ahead | 85.02 | 83.74 to 86.30 (95%) | 84.94 | 16668 bets | 6 | jra |
-| 25 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 4–5] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 4–5 | look_ahead | 85.60 | 81.54 to 89.69 (95%) | 84.80 | 5594 bets | 6 | jra |
-| 26 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 2–3] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 2–3 | look_ahead | 84.83 | 83.58 to 86.07 (95%) | 84.75 | 17252 bets | 6 | jra |
-| 27 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 4–5] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 4–5 | look_ahead | 84.80 | 80.81 to 88.82 (95%) | 84.14 | 5998 bets | 6 | jra |
-| 28 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 6–8] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 6–8 | look_ahead | 85.87 | 79.53 to 92.59 (95%) | 84.13 | 5845 bets | 6 | jra |
-| 29 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 3] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 3 | look_ahead | 84.07 | 82.02 to 86.10 (95%) | 83.91 | 8284 bets | 6 | jra |
-| 30 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 3] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 3 | look_ahead | 83.73 | 81.73 to 85.71 (95%) | 83.59 | 8576 bets | 6 | jra |
-| 31 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 6–8] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 6–8 | look_ahead | 84.03 | 78.68 to 89.49 (95%) | 83.18 | 8369 bets | 6 | jra |
-| 32 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 6–8] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 6–8 | look_ahead | 82.15 | 76.94 to 87.37 (95%) | 81.80 | 8654 bets | 6 | jra |
-| 33 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 2] | rule | PLACE | all_fields\|fav > 2.0\|rank 2 | look_ahead | 81.04 | 80.27 to 81.81 (95%) | 81.04 | 31124 bets | 6 | jra |
-| 34 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 2] | rule | PLACE | 8_plus\|fav > 2.0\|rank 2 | look_ahead | 80.99 | 80.23 to 81.76 (95%) | 80.99 | 30852 bets | 6 | jra |
-| 35 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 2–3] | rule | PLACE | all_fields\|fav > 2.0\|rank 2–3 | look_ahead | 79.76 | 79.22 to 80.30 (95%) | 79.76 | 61376 bets | 6 | jra |
-| 36 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 2–3] | rule | PLACE | 8_plus\|fav > 2.0\|rank 2–3 | look_ahead | 79.70 | 79.17 to 80.25 (95%) | 79.70 | 60843 bets | 6 | jra |
-| 37 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank all others] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank all others | look_ahead | 79.44 | 75.51 to 83.51 (95%) | 79.64 | 22623 bets | 6 | jra |
-| 38 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 4–5] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 4–5 | look_ahead | 79.43 | 77.64 to 81.28 (95%) | 79.47 | 16547 bets | 6 | jra |
-| 39 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank all others] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank all others | look_ahead | 79.10 | 75.26 to 83.14 (95%) | 79.35 | 23240 bets | 6 | jra |
-| 40 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 4–5] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 4–5 | look_ahead | 78.95 | 77.11 to 80.75 (95%) | 79.01 | 17123 bets | 6 | jra |
-| 41 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 6–8] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 6–8 | look_ahead | 77.10 | 68.18 to 86.41 (95%) | 78.89 | 2685 bets | 6 | jra |
-| 42 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 79.76 | 76.70 to 82.87 (95%) | 78.66 | 2092 races | 84 | jra |
-| 43 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 79.83 | 76.64 to 83.02 (95%) | 78.66 | 2092 races | 84 | jra |
-| 44 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 3] | rule | PLACE | all_fields\|fav > 2.0\|rank 3 | look_ahead | 78.44 | 77.53 to 79.37 (95%) | 78.46 | 30252 bets | 6 | jra |
-| 45 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 3] | rule | PLACE | 8_plus\|fav > 2.0\|rank 3 | look_ahead | 78.37 | 77.45 to 79.29 (95%) | 78.39 | 29991 bets | 6 | jra |
-| 46 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 78.58 | 76.33 to 80.83 (95%) | 78.05 | 7939 races | 84 | jra |
-| 47 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 78.37 | 76.53 to 80.23 (95%) | 78.02 | 10375 races | 84 | jra |
-| 48 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 6–8] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 6–8 | look_ahead | 77.76 | 75.34 to 80.12 (95%) | 77.94 | 24826 bets | 6 | jra |
-| 49 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 78.30 | 76.39 to 80.20 (95%) | 77.93 | 10978 races | 84 | jra |
-| 50 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 78.24 | 76.33 to 80.13 (95%) | 77.88 | 10978 races | 84 | jra |
-| 51 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 78.37 | 76.16 to 80.60 (95%) | 77.88 | 7939 races | 84 | jra |
-| 52 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 78.13 | 76.31 to 79.96 (95%) | 77.80 | 10375 races | 84 | jra |
-| 53 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank all others] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank all others | look_ahead | 77.28 | 73.92 to 80.67 (95%) | 77.69 | 32963 bets | 6 | jra |
-| 54 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 6–8] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 6–8 | look_ahead | 74.42 | 65.79 to 83.51 (95%) | 77.45 | 2809 bets | 6 | jra |
-| 55 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank all others] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank all others | look_ahead | 76.99 | 73.74 to 80.31 (95%) | 77.41 | 34064 bets | 6 | jra |
-| 56 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 6–8] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 6–8 | look_ahead | 77.16 | 74.85 to 79.52 (95%) | 77.37 | 25297 bets | 6 | jra |
-| 57 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.59 | 75.79 to 79.34 (95%) | 77.31 | 11070 races | 84 | jra |
-| 58 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.84 | 75.30 to 80.44 (95%) | 77.25 | 10559 races | 84 | jra |
-| 59 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.79 | 75.24 to 80.39 (95%) | 77.21 | 10559 races | 84 | jra |
-| 60 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 77.86 | 75.02 to 80.69 (95%) | 77.16 | 3820 races | 84 | jra |
-| 61 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.43 | 75.60 to 79.22 (95%) | 77.14 | 10559 races | 84 | jra |
-| 62 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:final_look_ahead/comparator | comparator | TRIO | all | look_ahead | 77.11 | — | — | 43130 races | 18 | jra |
-| 63 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.64 | 75.17 to 80.16 (95%) | 77.11 | 11070 races | 84 | jra |
-| 64 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.59 | 75.12 to 80.12 (95%) | 77.06 | 11070 races | 84 | jra |
-| 65 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 4–5] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 4–5 | look_ahead | 75.05 | 68.29 to 81.81 (95%) | 77.04 | 1972 bets | 6 | jra |
-| 66 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|all | cell | FORECAST | all | look_ahead | 77.16 | 75.89 to 78.43 (95%) | 77.02 | 23629 races | 84 | jra |
-| 67 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 78.63 | 74.31 to 83.12 (95%) | 77.00 | 2923 races | 84 | jra |
-| 68 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 77.62 | 74.80 to 80.38 (95%) | 76.97 | 3820 races | 84 | jra |
-| 69 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 77.21 | 75.30 to 79.07 (95%) | 76.92 | 5449 races | 84 | jra |
-| 70 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 79.31 | 73.91 to 84.70 (95%) | 76.92 | 2923 races | 84 | jra |
-| 71 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 79.26 | 73.85 to 84.65 (95%) | 76.88 | 2923 races | 84 | jra |
-| 72 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|all | cell | FORECAST | all | look_ahead | 76.93 | 75.69 to 78.20 (95%) | 76.81 | 23629 races | 84 | jra |
-| 73 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.04 | 75.26 to 78.76 (95%) | 76.79 | 11070 races | 84 | jra |
-| 74 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 4–5] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 4–5 | look_ahead | 74.61 | 68.12 to 81.69 (95%) | 76.77 | 1792 bets | 6 | jra |
-| 75 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 76.91 | 75.10 to 78.67 (95%) | 76.66 | 10559 races | 84 | jra |
-| 76 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 76.84 | 75.01 to 78.66 (95%) | 76.59 | 12559 races | 84 | jra |
-| 77 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 76.78 | 74.94 to 78.61 (95%) | 76.53 | 12559 races | 84 | jra |
-| 78 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 77.00 | 74.47 to 79.56 (95%) | 76.52 | 11870 races | 84 | jra |
-| 79 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 76.75 | 74.86 to 78.60 (95%) | 76.49 | 5449 races | 84 | jra |
-| 80 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 77.86 | 73.64 to 82.29 (95%) | 76.48 | 2923 races | 84 | jra |
-| 81 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 76.92 | 74.39 to 79.47 (95%) | 76.45 | 11870 races | 84 | jra |
-| 82 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 76.52 | 74.75 to 78.31 (95%) | 76.30 | 7939 races | 84 | jra |
-| 83 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 4–5] | rule | PLACE | 8_plus\|fav > 2.0\|rank 4–5 | look_ahead | 76.23 | 75.45 to 77.02 (95%) | 76.26 | 60099 bets | 6 | jra |
-| 84 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 4–5] | rule | PLACE | all_fields\|fav > 2.0\|rank 4–5 | look_ahead | 76.20 | 75.42 to 76.98 (95%) | 76.23 | 60627 bets | 6 | jra |
-| 85 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.99 | 74.06 to 77.87 (95%) | 75.77 | 11870 races | 84 | jra |
-| 86 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 75.93 | 74.20 to 77.66 (95%) | 75.75 | 7939 races | 84 | jra |
-| 87 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.83 | 74.58 to 77.06 (95%) | 75.74 | 7616 races | 84 | jra |
-| 88 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 6–8] | rule | PLACE | 8_plus\|fav > 2.0\|rank 6–8 | look_ahead | 75.67 | 74.72 to 76.55 (95%) | 75.72 | 90208 bets | 6 | jra |
-| 89 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 6–8] | rule | PLACE | all_fields\|fav > 2.0\|rank 6–8 | look_ahead | 75.52 | 74.57 to 76.41 (95%) | 75.57 | 90649 bets | 6 | jra |
-| 90 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 77.66 | 71.46 to 83.77 (95%) | 75.55 | 189 races | 84 | jra |
-| 91 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.75 | 73.81 to 77.63 (95%) | 75.54 | 11870 races | 84 | jra |
-| 92 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.81 | 73.16 to 78.49 (95%) | 75.43 | 7616 races | 84 | jra |
-| 93 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 75.46 | 74.16 to 76.75 (95%) | 75.37 | 12559 races | 84 | jra |
-| 94 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.42 | 74.22 to 76.61 (95%) | 75.35 | 7616 races | 84 | jra |
-| 95 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.69 | 73.07 to 78.34 (95%) | 75.33 | 7616 races | 84 | jra |
-| 96 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|all | cell | FORECAST | all | look_ahead | 75.36 | 74.38 to 76.34 (95%) | 75.31 | 23629 races | 84 | jra |
-| 97 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.82 | 72.60 to 79.09 (95%) | 75.28 | 7616 races | 84 | jra |
-| 98 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.35 | 74.01 to 76.70 (95%) | 75.26 | 11870 races | 84 | jra |
-| 99 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.78 | 72.56 to 79.06 (95%) | 75.25 | 7616 races | 84 | jra |
-| 100 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|all | cell | FORECAST | all | look_ahead | 75.38 | 73.65 to 77.14 (95%) | 75.23 | 23629 races | 84 | jra |
-| 101 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|all | cell | FORECAST | all | look_ahead | 75.33 | 73.60 to 77.09 (95%) | 75.18 | 23629 races | 84 | jra |
-| 102 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 75.24 | 73.72 to 76.81 (95%) | 75.13 | 11070 races | 84 | jra |
-| 103 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.20 | 73.81 to 76.60 (95%) | 75.11 | 10375 races | 84 | jra |
-| 104 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank all others] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank all others | look_ahead | 72.57 | 66.72 to 78.87 (95%) | 75.05 | 10340 bets | 6 | jra |
-| 105 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 76.69 | 70.44 to 82.75 (95%) | 74.99 | 189 races | 84 | jra |
-| 106 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 75.10 | 73.54 to 76.72 (95%) | 74.98 | 10559 races | 84 | jra |
-| 107 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank all others] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank all others | look_ahead | 72.45 | 66.74 to 78.66 (95%) | 74.90 | 10824 bets | 6 | jra |
-| 108 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 74.97 | 73.71 to 76.23 (95%) | 74.90 | 12559 races | 84 | jra |
-| 109 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.15 | 72.63 to 77.77 (95%) | 74.87 | 10375 races | 84 | jra |
-| 110 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 75.29 | 72.04 to 78.63 (95%) | 74.84 | 10978 races | 42 | jra |
-| 111 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.07 | 72.56 to 77.68 (95%) | 74.80 | 10375 races | 84 | jra |
-| 112 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|all | cell | FORECAST | all | look_ahead | 74.75 | 73.82 to 75.70 (95%) | 74.72 | 23629 races | 84 | jra |
-| 113 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 74.76 | 73.40 to 76.14 (95%) | 74.69 | 10978 races | 84 | jra |
-| 114 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 74.74 | 73.47 to 76.04 (95%) | 74.67 | 11870 races | 84 | jra |
-| 115 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.96 | 72.04 to 77.90 (95%) | 74.63 | 5449 races | 84 | jra |
-| 116 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 74.58 | 73.25 to 75.93 (95%) | 74.52 | 10375 races | 84 | jra |
-| 117 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 74.51 | 73.04 to 76.02 (95%) | 74.43 | 11070 races | 84 | jra |
-| 118 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.93 | 71.24 to 78.89 (95%) | 74.43 | 7939 races | 42 | jra |
-| 119 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 74.73 | 71.59 to 77.88 (95%) | 74.40 | 12559 races | 42 | jra |
-| 120 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.73 | 71.54 to 78.06 (95%) | 74.37 | 5449 races | 84 | jra |
-| 121 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.68 | 71.50 to 78.02 (95%) | 74.34 | 5449 races | 84 | jra |
-| 122 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 74.38 | 72.88 to 75.93 (95%) | 74.31 | 10559 races | 84 | jra |
-| 123 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.49 | 71.56 to 77.46 (95%) | 74.22 | 7939 races | 84 | jra |
-| 124 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.45 | 71.53 to 77.43 (95%) | 74.19 | 7939 races | 84 | jra |
-| 125 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 83.80 | 66.70 to 102.90 (95%) | 74.18 | 189 races | 42 | jra |
-| 126 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 75.25 | 69.13 to 81.46 (95%) | 74.16 | 2092 races | 84 | jra |
-| 127 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 75.18 | 69.03 to 81.40 (95%) | 74.11 | 2092 races | 84 | jra |
-| 128 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 74.15 | 72.84 to 75.49 (95%) | 74.11 | 10978 races | 84 | jra |
-| 129 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 74.02 | 71.93 to 76.10 (95%) | 73.92 | 2923 races | 84 | jra |
-| 130 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.04 | 71.22 to 76.85 (95%) | 73.85 | 5449 races | 84 | jra |
-| 131 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 74.23 | 69.53 to 79.09 (95%) | 73.75 | 3820 races | 42 | jra |
-| 132 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 90.01 | 63.01 to 119.98 (95%) | 73.70 | 189 races | 84 | jra |
-| 133 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 89.69 | 62.82 to 119.57 (95%) | 73.69 | 189 races | 84 | jra |
-| 134 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 73.62 | 71.60 to 75.61 (95%) | 73.55 | 2923 races | 84 | jra |
-| 135 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 73.39 | 71.00 to 75.83 (95%) | 73.32 | 12559 races | 84 | jra |
-| 136 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 73.33 | 70.94 to 75.76 (95%) | 73.26 | 12559 races | 84 | jra |
-| 137 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 9+] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 9+ | look_ahead | 59.84 | 48.12 to 72.72 (95%) | 73.24 | 4067 bets | 6 | jra |
-| 138 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 9+] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 9+ | look_ahead | 59.84 | 48.12 to 72.72 (95%) | 73.24 | 4067 bets | 6 | jra |
-| 139 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 73.05 | 70.47 to 75.66 (95%) | 73.00 | 10978 races | 84 | jra |
-| 140 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 167.26 | 70.24 to 315.23 (95%) | 72.99 | 189 races | 42 | jra |
-| 141 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 72.98 | 70.41 to 75.60 (95%) | 72.95 | 10978 races | 84 | jra |
-| 142 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.96 | 70.18 to 75.86 (95%) | 72.92 | 3820 races | 84 | jra |
-| 143 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 72.96 | 68.46 to 77.73 (95%) | 72.88 | 7616 races | 42 | jra |
-| 144 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 75.03 | 46.60 to 105.94 (95%) | 72.79 | 189 races | 42 | jra |
-| 145 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank all others] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank all others | look_ahead | 72.43 | 71.08 to 73.79 (95%) | 72.61 | 103129 bets | 6 | jra |
-| 146 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 72.54 | 69.25 to 75.96 (95%) | 72.56 | 10375 races | 42 | jra |
-| 147 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank all others] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank all others | look_ahead | 72.31 | 70.97 to 73.64 (95%) | 72.48 | 104760 bets | 6 | jra |
-| 148 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.34 | 69.63 to 75.17 (95%) | 72.38 | 3820 races | 84 | jra |
-| 149 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.22 | 68.37 to 76.13 (95%) | 72.32 | 3820 races | 84 | jra |
-| 150 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.19 | 68.36 to 76.11 (95%) | 72.30 | 3820 races | 84 | jra |
-| 151 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 66.51 | 45.85 to 88.45 (95%) | 72.03 | 189 races | 84 | jra |
-| 152 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|all | cell | FORECAST | all | look_ahead | 71.91 | 69.71 to 74.22 (95%) | 71.97 | 23629 races | 42 | jra |
-| 153 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 70.31 | 60.22 to 80.91 (95%) | 71.90 | 2923 races | 42 | jra |
-| 154 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 70.71 | 62.71 to 79.51 (95%) | 71.84 | 2092 races | 42 | jra |
-| 155 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 63.33 | 43.69 to 84.20 (95%) | 71.62 | 189 races | 84 | jra |
-| 156 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank all others] | rule | PLACE | 8_plus\|fav > 2.0\|rank all others | look_ahead | 71.57 | 70.97 to 72.18 (95%) | 71.61 | 402830 bets | 6 | jra |
-| 157 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank all others] | rule | PLACE | all_fields\|fav > 2.0\|rank all others | look_ahead | 71.56 | 70.96 to 72.16 (95%) | 71.60 | 404332 bets | 6 | jra |
-| 158 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 9+] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 9+ | look_ahead | 64.66 | 57.17 to 72.62 (95%) | 71.31 | 9334 bets | 6 | jra |
-| 159 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 9+] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 9+ | look_ahead | 64.66 | 57.17 to 72.62 (95%) | 71.31 | 9334 bets | 6 | jra |
-| 160 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 70.19 | 65.66 to 74.84 (95%) | 70.91 | 2092 races | 84 | jra |
-| 161 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 68.81 | 61.79 to 76.45 (95%) | 70.77 | 2923 races | 42 | jra |
-| 162 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 69.81 | 65.28 to 74.40 (95%) | 70.63 | 2092 races | 84 | jra |
-| 163 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 69.14 | 65.79 to 72.61 (95%) | 69.78 | 11870 races | 42 | jra |
-| 164 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 69.12 | 65.72 to 72.62 (95%) | 69.78 | 5449 races | 42 | jra |
-| 165 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 63.56 | 53.72 to 73.83 (95%) | 69.58 | 2092 races | 42 | jra |
-| 166 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 66.08 | 58.74 to 73.78 (95%) | 69.52 | 3820 races | 42 | jra |
-| 167 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 68.70 | 65.54 to 71.95 (95%) | 69.36 | 11070 races | 42 | jra |
-| 168 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 68.62 | 65.35 to 71.97 (95%) | 69.33 | 10559 races | 42 | jra |
-| 169 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 9+] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 9+ | look_ahead | 63.20 | 56.73 to 70.11 (95%) | 69.27 | 13401 bets | 6 | jra |
-| 170 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 9+] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 9+ | look_ahead | 63.20 | 56.73 to 70.11 (95%) | 69.27 | 13401 bets | 6 | jra |
-| 171 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 66.76 | 61.23 to 72.37 (95%) | 68.98 | 2092 races | 42 | jra |
-| 172 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 65.45 | 60.57 to 70.62 (95%) | 67.82 | 10978 races | 42 | jra |
-| 173 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 65.04 | 59.85 to 70.56 (95%) | 67.76 | 7616 races | 42 | jra |
-| 174 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:final_look_ahead/comparator | comparator | TIERCE | all | look_ahead | 67.67 | — | — | 43130 races | 18 | jra |
-| 175 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 65.15 | 60.35 to 70.33 (95%) | 67.59 | 11870 races | 42 | jra |
-| 176 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 65.28 | 60.70 to 70.09 (95%) | 67.49 | 12559 races | 42 | jra |
-| 177 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 64.37 | 59.36 to 69.70 (95%) | 67.20 | 10375 races | 42 | jra |
-| 178 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 63.04 | 58.31 to 68.01 (95%) | 66.05 | 10559 races | 42 | jra |
-| 179 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 9+] | rule | PLACE | 8_plus\|fav > 2.0\|rank 9+ | look_ahead | 65.59 | 64.31 to 66.90 (95%) | 65.89 | 191680 bets | 6 | jra |
-| 180 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 9+] | rule | PLACE | all_fields\|fav > 2.0\|rank 9+ | look_ahead | 65.59 | 64.31 to 66.90 (95%) | 65.89 | 191680 bets | 6 | jra |
-| 181 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 62.99 | 58.39 to 67.75 (95%) | 65.87 | 11070 races | 42 | jra |
-| 182 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|all | cell | FORECAST | all | look_ahead | 64.21 | 61.03 to 67.53 (95%) | 65.64 | 23629 races | 42 | jra |
-| 183 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:final_look_ahead | rule | TIERCE | all | look_ahead | 65.58 | — | — | 43130 races | 18 | jra |
-| 184 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:final_look_ahead | rule | TIERCE | all | look_ahead | 65.58 | — | — | 43130 races | 18 | jra |
-| 185 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 61.89 | 57.23 to 66.81 (95%) | 65.21 | 7939 races | 42 | jra |
-| 186 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 58.95 | 53.33 to 65.14 (95%) | 64.47 | 2923 races | 42 | jra |
-| 187 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 62.50 | 59.55 to 65.67 (95%) | 64.06 | 7616 races | 42 | jra |
-| 188 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 59.16 | 53.95 to 64.73 (95%) | 64.02 | 5449 races | 42 | jra |
-| 189 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 9+] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 9+ | look_ahead | 62.27 | 59.52 to 65.06 (95%) | 63.81 | 45088 bets | 6 | jra |
-| 190 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 9+] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 9+ | look_ahead | 62.27 | 59.52 to 65.06 (95%) | 63.81 | 45088 bets | 6 | jra |
-| 191 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 61.77 | 59.30 to 64.42 (95%) | 62.99 | 12559 races | 42 | jra |
-| 192 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 61.33 | 58.64 to 64.23 (95%) | 62.82 | 10978 races | 42 | jra |
-| 193 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 59.05 | 55.77 to 62.60 (95%) | 61.55 | 7939 races | 42 | jra |
-| 194 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 58.72 | 55.83 to 61.73 (95%) | 60.73 | 11870 races | 42 | jra |
-| 195 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 55.74 | 51.40 to 60.11 (95%) | 60.28 | 3820 races | 42 | jra |
-| 196 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:final_look_ahead/comparator | comparator | QUINELLA | all | card_only | 60.18 | — | — | 43130 races | 18 | jra |
-| 197 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_20:final_look_ahead | rule | QUINELLA | all | look_ahead | 60.15 | — | — | 43130 races | 18 | jra |
-| 198 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_10:final_look_ahead | rule | QUINELLA | all | look_ahead | 60.01 | — | — | 43130 races | 18 | jra |
-| 199 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:final_look_ahead | rule | QUINELLA | all | look_ahead | 59.93 | — | — | 43130 races | 18 | jra |
-| 200 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 57.70 | 54.96 to 60.50 (95%) | 59.63 | 10375 races | 42 | jra |
-| 201 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|all | cell | FORECAST | all | look_ahead | 58.35 | 56.45 to 60.34 (95%) | 59.33 | 23629 races | 42 | jra |
-| 202 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 52.89 | 48.07 to 57.93 (95%) | 59.22 | 5449 races | 42 | jra |
-| 203 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 54.47 | 51.50 to 57.65 (95%) | 57.28 | 11070 races | 42 | jra |
-| 204 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_100:final_look_ahead | rule | TRIO | all | look_ahead | 56.95 | — | — | 43130 races | 18 | jra |
-| 205 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_50:final_look_ahead | rule | TRIO | all | look_ahead | 56.94 | — | — | 43130 races | 18 | jra |
-| 206 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:final_look_ahead | rule | TRIO | all | look_ahead | 56.78 | — | — | 43130 races | 18 | jra |
-| 207 | japan-family-l-exotic-pool-choice/L4:same_bracket_vs_quinellas:card_only/comparator | comparator | QUINELLA | all | card_only | 56.71 | — | — | 41168 races | 18 | jra |
-| 208 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 53.59 | 50.59 to 56.78 (95%) | 56.57 | 10559 races | 42 | jra |
-| 209 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:final_look_ahead/comparator | comparator | TRIO | all | card_only | 53.50 | — | — | 43130 races | 18 | jra |
-| 210 | japan-family-l-exotic-pool-choice/L4:same_bracket_vs_quinellas:card_only | rule | BRACKET_QUINELLA | all | card_only | 51.42 | — | — | 41168 races | 18 | jra |
-| — | exacta-own-impact/payout-identity | other | — | all | unknown | — | — | — | — | 1 | jra |
-| — | japan-131-exacta-breakage/breakage\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan-131-exacta-breakage/breakage\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan-131-exacta-category-v2-max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 1 | jra |
-| — | japan-131-exacta-logscore-v2/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan-131-exacta-logscore-v2/c\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan-131-exacta-logscore-v3/c\|lambda2=per_fold | cell | — | all | unknown | — | — | — | — | 1 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-131-exacta-rule-v5/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.1\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.1\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.2\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.2\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.3\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.3\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.5\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.5\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-beta-clustered-final-win/entropy_bins_clustered | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/power_beta_clustered:by_year_and_era:all_races | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/power_beta_clustered:by_year_and_era:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:R11pm1 | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:R12 | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:debut | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:field_16_plus | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:g1_day_undercard | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:handicap | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:heavy_going | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-beta-clustered-final-win/segment_clustered:venue | model | — | all | unknown | — | — | — | — | 11 | jra |
-| — | japan-board-quality-by-horizon/board_vs_final:normalised | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-board-quality-by-horizon/board_vs_final:power | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-board-quality-by-horizon/board_vs_final:shin | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-board-quality-by-horizon/drift_sd:late_card | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-board-quality-by-horizon/drift_sd:low_turnover | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-board-quality-by-horizon/spurious_ev:by_pool_and_tau | model | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-c2-interactions-final-win/cells:horse | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:horse_x_course | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:horse_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:horse_x_trainer | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:trainer | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:trainer_x_debut | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/cells:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-04-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-07-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-10-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/horse_x_trainer:not_fitted | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/level1:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/level1:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/level1:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/level1:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/level1:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:base_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:horse_aptitude_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:horse_x_jockey_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:trainer_debut_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:trainer_x_track_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/marginal:stage2:transfer_step_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/selection:rating_pair | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:calibrated_market | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:base | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:market_only | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tail:stage2:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tau:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tau:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tau:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tau:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win/tau:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:horse | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:horse_x_course | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:horse_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:horse_x_trainer | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:trainer | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:trainer_x_debut | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/cells:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-04-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-07-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-10-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/horse_x_trainer:not_fitted | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/level1:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/level1:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/level1:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/level1:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/level1:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:base_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_aptitude_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_x_jockey_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_debut_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_x_track_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/marginal:stage2:transfer_step_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/selection:rating_pair | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:calibrated_market | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:base | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:market_only | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tail:stage2:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tau:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tau:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tau:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tau:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-interactions-final-win-v2/tau:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra |
-| — | japan-c2-rating-final-win/correlation:ln_q | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-c2-rating-final-win/meeting_clustered:stage2:q:rating | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-c2-rating-final-win/member_alone:rating | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-c2-rating-final-win/selection:inner_fold | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-c2-rating-final-win/stage2:q:rating | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-c4-meta-final-win/ceiling:calibrated_market | model | — | all | unknown | — | — | — | — | 38 | jra |
-| — | japan-c4-meta-final-win/market:normalised | model | — | all | unknown | — | — | — | — | 38 | jra |
-| — | japan-calibrated-market-final-win/normalised:all_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/normalised:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/power:all_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/power:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/shin:all_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/shin:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/spline:all_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-calibrated-market-final-win/spline:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan-coplacer-place-e15/step1:8_plus:odds_matched | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-coplacer-place-e15/step1:all_fields:odds_matched | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-coplacer-place-e15/step2:decision_time:T-2:ranks_2_3 | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-coplacer-place-e15/step3:mechanism:stake_back_share | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-crowd-calibration-final-win/entropy_bins | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/normalised:all_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/normalised:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/power:all_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/power:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/power_beta:by_year_and_era:all_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/power_beta:by_year_and_era:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:R11pm1 | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:R12 | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:debut | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:field_16_plus | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:g1_day_undercard | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:handicap | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:heavy_going | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/segment:venue | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/shin:all_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-crowd-calibration-final-win/shin:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra |
-| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:tail_count_strata | model | — | all | unknown | — | — | — | — | 3 | jra |
-| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:tail_share | model | — | all | unknown | — | — | — | — | 3 | jra |
-| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:unconditioned | model | — | all | unknown | — | — | — | — | 3 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_10:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_20:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_100:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_50:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:board_at_t | rule | TIERCE | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:board_at_t | rule | TIERCE | all | decision_time | — | — | — | — | 18 | jra |
-| — | japan-family-l-exotic-pool-choice/L5:calendar_report | other | — | all | unknown | — | — | — | — | 18 | jra |
-| — | japan-family-l-floor-tail-favourite/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:QUINELLA_PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra |
-| — | japan-handicap-speed-96-final-win/interim_par:V1:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-handicap-speed-96-final-win/interim_par:V2:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-handicap-speed-96-final-win/swap:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-handicap-speed-96-final-win/swap:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-handicap-speed-96-final-win/v96:V1:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-handicap-speed-96-final-win/v96:V2:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra |
-| — | japan-same-day-bias-final-win/history_prior:pooled_coefficient | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-same-day-bias-final-win/history_prior:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-same-day-bias-final-win/posterior:pooled_coefficient | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-same-day-bias-final-win/posterior:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-same-day-bias-final-win/same_day_update:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t1-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t16-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t2-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t2-race | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t30-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t5-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/calibration-win-t60-meeting | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/drift-win-lag11 | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/drift-win-lag14 | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/drift-win-lag3 | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/hand-played-bets | other | — | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-shadow-calibration-v1/pick-rule-q05-t2 | rule | WIN | all | unknown | — | — | — | — | 12 | jra |
-| — | japan-speed-top3-c3/normal:variant_off_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3/normal:variant_on_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3/t5:variant_off_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3/t5:variant_on_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3-timing/normal:variant_off_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3-timing/normal:variant_on_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3-timing/t5:variant_off_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-speed-top3-c3-timing/t5:variant_on_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-beta-final-win/tail_beta:by_year:all_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-beta-final-win/tail_beta:by_year:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-beta-final-win/tail_beta:walk_forward:all_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-beta-final-win/tail_beta:walk_forward:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-hinge-final-win/tail_hinge:by_year:all_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-hinge-final-win/tail_hinge:by_year:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-hinge-final-win/tail_hinge:walk_forward:all_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-tail-hinge-final-win/tail_hinge:walk_forward:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra |
-| — | japan-track-bias-day-sd/day-sd-estimates | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-track-bias-day-sd/last-fold-variance-se-diagnostic | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-track-bias-day-sd/per_level-predictive-vs-prior | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-track-bias-day-sd/per_level-vs-pooled | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-track-bias-day-sd/pooled-predictive-vs-prior | member | — | all | unknown | — | — | — | — | 5 | jra |
-| — | japan-track-bias-null-diagnostic/all_138 | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/baseline | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/corner | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/corner+all_138 | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/obs_weights | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/obs_weights+fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/obs_weights+one_race_groups | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/one_race_groups | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-track-bias-null-diagnostic/one_race_groups+fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra |
-| — | japan-v0-win-residual/segments-13-ridge-100 | model | — | all | unknown | — | — | — | — | 1 | jra |
-| — | japan/131-exacta-breakage/breakage\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-breakage/breakage\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v1/max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra |
-| — | japan/131-exacta-category-v2/max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 1 | jra |
-| — | japan/131-exacta-logscore-v1/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-logscore-v1/c\|lambda2=in_fold | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-logscore-v2/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-logscore-v2/c\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v2/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/131-exacta-rule-v3/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.1\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.1\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.2\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.2\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.3\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.3\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.5\|all | other | — | all | unknown | — | — | — | — | 8 | jra |
-| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.5\|headline | other | — | all | unknown | — | — | — | — | 8 | jra |
+| Rank | Option | Kind | Pool | Segment | Selection | Return per ¥100 staked | CI | Shrunk | n | Variants searched | Sources | Capacity (median ¥ per edge) |
+| ---: | --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- | --- |
+| 1 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 2] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 2 | look_ahead | 95.14 | 91.56 to 98.73 (95%) | 93.27 | 3023 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 2 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 2] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 2 | look_ahead | 95.77 | 91.59 to 100.08 (95%) | 93.17 | 2032 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 3 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 2] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 2 | look_ahead | 94.80 | 90.51 to 99.24 (95%) | 92.26 | 1918 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 4 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 2] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 2 | look_ahead | 93.96 | 90.35 to 97.64 (95%) | 92.20 | 2818 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 5 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 2–3] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 2–3 | look_ahead | 92.59 | 89.47 to 95.73 (95%) | 91.40 | 5599 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 6 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 2–3] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 2–3 | look_ahead | 92.51 | 89.39 to 95.65 (95%) | 91.33 | 6011 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 7 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 2–3] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 2–3 | look_ahead | 92.60 | 88.86 to 96.38 (95%) | 90.95 | 3803 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 8 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 2–3] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 2–3 | look_ahead | 92.26 | 88.65 to 96.05 (95%) | 90.70 | 4035 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 9 | japan-c5-exotic-dividends/sp:place:cal:harv:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 91.13 | 87.65 to 94.57 (95%) | 89.89 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 10 | japan-c5-exotic-dividends/sp:place:cal:hen:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 91.13 | 87.65 to 94.57 (95%) | 89.89 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 11 | japan-c5-exotic-dividends/sp:place:cal:qc:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 91.13 | 87.65 to 94.57 (95%) | 89.89 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 12 | japan-c5-exotic-dividends/sp:place:norm:harv:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 91.13 | 87.65 to 94.57 (95%) | 89.89 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 13 | japan-c5-exotic-dividends/sp:place:norm:hen:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 91.13 | 87.65 to 94.57 (95%) | 89.89 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 14 | japan-c5-exotic-dividends/sp:place:norm:qc:none:stat:bound[super_premium] | model | PLACE | super_premium | look_ahead | 90.88 | 87.44 to 94.30 (95%) | 89.69 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 15 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 2–3] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 2–3 | look_ahead | 93.03 | 87.03 to 98.98 (95%) | 89.51 | 1976 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 16 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 2] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 2 | look_ahead | 93.83 | 87.02 to 100.68 (95%) | 89.34 | 991 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 17 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 2–3] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 2–3 | look_ahead | 92.57 | 86.77 to 98.73 (95%) | 89.19 | 1796 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 18 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 3] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 3 | look_ahead | 91.20 | 86.57 to 95.87 (95%) | 89.16 | 2781 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 19 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 4–5] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 4–5 | look_ahead | 90.78 | 85.79 to 95.82 (95%) | 88.60 | 3802 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 20 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 2] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 2 | look_ahead | 92.18 | 85.50 to 99.07 (95%) | 88.33 | 900 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 21 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 3] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 3 | look_ahead | 89.85 | 85.31 to 94.44 (95%) | 88.16 | 2988 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 22 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 3] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 3 | look_ahead | 90.36 | 84.81 to 96.03 (95%) | 87.90 | 1885 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 23 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 4–5] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 4–5 | look_ahead | 89.58 | 84.66 to 94.58 (95%) | 87.71 | 4026 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 24 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 3] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 3 | look_ahead | 92.96 | 84.51 to 101.85 (95%) | 87.48 | 896 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 25 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 3] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 3 | look_ahead | 92.21 | 83.84 to 100.72 (95%) | 87.24 | 985 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 26 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 3] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 3 | look_ahead | 88.69 | 83.29 to 94.10 (95%) | 86.81 | 2003 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 27 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 2] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 2 | look_ahead | 85.96 | 84.34 to 87.56 (95%) | 85.83 | 8384 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 28 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 2] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 2 | look_ahead | 85.91 | 84.32 to 87.50 (95%) | 85.78 | 8676 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 29 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 6–8] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 6–8 | look_ahead | 87.31 | 80.91 to 94.09 (95%) | 85.32 | 5684 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 30 | japan-c5-exotic-dividends/sp:place:cal:harv:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.94 | 81.20 to 90.62 (95%) | 85.01 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 31 | japan-c5-exotic-dividends/sp:place:cal:hen:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.94 | 81.20 to 90.62 (95%) | 85.01 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 32 | japan-c5-exotic-dividends/sp:place:cal:qc:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.94 | 81.20 to 90.62 (95%) | 85.01 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 33 | japan-c5-exotic-dividends/sp:place:norm:harv:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.94 | 81.20 to 90.62 (95%) | 85.01 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 34 | japan-c5-exotic-dividends/sp:place:norm:hen:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.94 | 81.20 to 90.62 (95%) | 85.01 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 35 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 2–3] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 2–3 | look_ahead | 85.02 | 83.74 to 86.30 (95%) | 84.95 | 16668 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 36 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 4–5] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 4–5 | look_ahead | 85.60 | 81.54 to 89.69 (95%) | 84.93 | 5594 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 37 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 2–3] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 2–3 | look_ahead | 84.83 | 83.58 to 86.07 (95%) | 84.77 | 17252 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 38 | japan-c5-exotic-dividends/sp:place:norm:qc:none:stat:drop[super_premium] | model | PLACE | super_premium | look_ahead | 85.58 | 80.91 to 90.27 (95%) | 84.74 | 342 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 39 | japan-c5-exotic-dividends/place:norm:qc:none:stat:bound | model | PLACE | all | look_ahead | 84.64 | 83.97 to 85.32 (95%) | 84.62 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 40 | japan-c5-exotic-dividends/place:cal:hen:none:stat:bound | model | PLACE | all | look_ahead | 84.59 | 83.91 to 85.26 (95%) | 84.57 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 41 | japan-c5-exotic-dividends/place:cal:harv:none:stat:bound | model | PLACE | all | look_ahead | 84.57 | 83.90 to 85.24 (95%) | 84.55 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 42 | japan-c5-exotic-dividends/place:norm:hen:none:stat:bound | model | PLACE | all | look_ahead | 84.57 | 83.90 to 85.24 (95%) | 84.55 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 43 | japan-c5-exotic-dividends/place:cal:qc:none:stat:bound | model | PLACE | all | look_ahead | 84.47 | 83.80 to 85.14 (95%) | 84.45 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 44 | japan-c5-exotic-dividends/place:norm:harv:none:stat:bound | model | PLACE | all | look_ahead | 84.44 | 83.77 to 85.12 (95%) | 84.43 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 45 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 6–8] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 6–8 | look_ahead | 85.87 | 79.53 to 92.59 (95%) | 84.41 | 5845 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 46 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 4–5] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 4–5 | look_ahead | 84.80 | 80.81 to 88.82 (95%) | 84.28 | 5998 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 47 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 3] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 3 | look_ahead | 84.07 | 82.02 to 86.10 (95%) | 83.95 | 8284 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 48 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 3] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 3 | look_ahead | 83.73 | 81.73 to 85.71 (95%) | 83.63 | 8576 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 49 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 6–8] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 6–8 | look_ahead | 84.03 | 78.68 to 89.49 (95%) | 83.40 | 8369 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 50 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 6–8] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 6–8 | look_ahead | 82.15 | 76.94 to 87.37 (95%) | 82.03 | 8654 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 51 | japan-c5-exotic-dividends/sp:quinella:cal:harv:none[super_premium] | model | QUINELLA | super_premium | look_ahead | 96.03 | 78.65 to 114.21 (95%) | 81.26 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 52 | japan-c5-exotic-dividends/sp:quinella:cal:hen:none[super_premium] | model | QUINELLA | super_premium | look_ahead | 96.03 | 78.65 to 114.21 (95%) | 81.26 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 53 | japan-c5-exotic-dividends/sp:quinella:norm:harv:none[super_premium] | model | QUINELLA | super_premium | look_ahead | 96.03 | 78.65 to 114.21 (95%) | 81.26 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 54 | japan-c5-exotic-dividends/sp:quinella:norm:hen:none[super_premium] | model | QUINELLA | super_premium | look_ahead | 96.03 | 78.65 to 114.21 (95%) | 81.26 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 55 | japan-c5-exotic-dividends/sp:quinella:norm:qc:none[super_premium] | model | QUINELLA | super_premium | look_ahead | 96.03 | 78.65 to 114.21 (95%) | 81.26 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 56 | japan-c5-exotic-dividends/quinella:norm:hen:none | model | QUINELLA | all | look_ahead | 81.19 | 78.99 to 83.44 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 57 | japan-c5-exotic-dividends/quinella:cal:qc:none | model | QUINELLA | all | look_ahead | 81.11 | 78.89 to 83.40 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 58 | japan-c5-exotic-dividends/quinella:norm:harv:none | model | QUINELLA | all | look_ahead | 81.11 | 78.90 to 83.36 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 59 | japan-c5-exotic-dividends/quinella:cal:harv:none | model | QUINELLA | all | look_ahead | 81.05 | 78.82 to 83.31 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 60 | japan-c5-exotic-dividends/quinella:norm:qc:none | model | QUINELLA | all | look_ahead | 81.00 | 78.77 to 83.26 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 61 | japan-c5-exotic-dividends/quinella:cal:hen:none | model | QUINELLA | all | look_ahead | 80.92 | 78.70 to 83.19 (95%) | 81.26 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 62 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 2] | rule | PLACE | all_fields\|fav > 2.0\|rank 2 | look_ahead | 81.04 | 80.27 to 81.81 (95%) | 81.04 | 31124 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 63 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 2] | rule | PLACE | 8_plus\|fav > 2.0\|rank 2 | look_ahead | 80.99 | 80.23 to 81.76 (95%) | 81.00 | 30852 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 64 | japan-c5-exotic-dividends/sp:wide:cal:harv:none:stat:bound[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.95 | 79.62 to 103.98 (95%) | 80.39 | 395 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 65 | japan-c5-exotic-dividends/sp:wide:cal:hen:none:stat:bound[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.95 | 79.62 to 103.98 (95%) | 80.39 | 395 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 66 | japan-c5-exotic-dividends/sp:wide:norm:hen:none:stat:bound[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.95 | 79.62 to 103.98 (95%) | 80.39 | 395 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 67 | japan-c5-exotic-dividends/sp:wide:cal:harv:none:stat:drop[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.81 | 79.42 to 103.92 (95%) | 80.39 | 392 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 68 | japan-c5-exotic-dividends/sp:wide:cal:hen:none:stat:drop[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.81 | 79.42 to 103.92 (95%) | 80.39 | 392 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 69 | japan-c5-exotic-dividends/sp:wide:norm:hen:none:stat:drop[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 91.81 | 79.42 to 103.92 (95%) | 80.39 | 392 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 70 | japan-c5-exotic-dividends/sp:wide:norm:harv:none:stat:bound[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 90.96 | 78.66 to 103.21 (95%) | 80.39 | 395 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 71 | japan-c5-exotic-dividends/sp:wide:norm:qc:none:stat:bound[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 90.96 | 78.66 to 103.21 (95%) | 80.39 | 395 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 72 | japan-c5-exotic-dividends/sp:wide:norm:harv:none:stat:drop[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 90.82 | 78.40 to 103.15 (95%) | 80.39 | 392 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 73 | japan-c5-exotic-dividends/sp:wide:norm:qc:none:stat:drop[super_premium] | model | QUINELLA_PLACE | super_premium | look_ahead | 90.82 | 78.40 to 103.15 (95%) | 80.39 | 392 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 74 | japan-c5-exotic-dividends/wide:norm:qc:none:stat:bound | model | QUINELLA_PLACE | all | look_ahead | 80.32 | 78.96 to 81.66 (95%) | 80.33 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 75 | japan-c5-exotic-dividends/wide:norm:hen:none:stat:bound | model | QUINELLA_PLACE | all | look_ahead | 80.26 | 78.89 to 81.60 (95%) | 80.31 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 76 | japan-c5-exotic-dividends/wide:norm:harv:none:stat:bound | model | QUINELLA_PLACE | all | look_ahead | 80.22 | 78.87 to 81.58 (95%) | 80.30 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 77 | japan-c5-exotic-dividends/wide:cal:harv:none:stat:bound | model | QUINELLA_PLACE | all | look_ahead | 80.20 | 78.84 to 81.55 (95%) | 80.29 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 78 | japan-c5-exotic-dividends/wide:cal:hen:none:stat:bound | model | QUINELLA_PLACE | all | look_ahead | 80.17 | 78.82 to 81.51 (95%) | 80.28 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 79 | japan-c5-exotic-dividends/wide:norm:qc:none:stat:drop | model | QUINELLA_PLACE | all | look_ahead | 80.11 | 78.75 to 81.46 (95%) | 80.26 | 23709 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 80 | japan-c5-exotic-dividends/wide:norm:hen:none:stat:drop | model | QUINELLA_PLACE | all | look_ahead | 80.05 | 78.68 to 81.41 (95%) | 80.24 | 23709 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 81 | japan-c5-exotic-dividends/wide:norm:harv:none:stat:drop | model | QUINELLA_PLACE | all | look_ahead | 80.02 | 78.66 to 81.38 (95%) | 80.23 | 23709 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 82 | japan-c5-exotic-dividends/wide:cal:harv:none:stat:drop | model | QUINELLA_PLACE | all | look_ahead | 80.00 | 78.63 to 81.35 (95%) | 80.23 | 23709 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 83 | japan-c5-exotic-dividends/wide:cal:hen:none:stat:drop | model | QUINELLA_PLACE | all | look_ahead | 79.97 | 78.61 to 81.31 (95%) | 80.22 | 23709 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 84 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank all others] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank all others | look_ahead | 79.44 | 75.51 to 83.51 (95%) | 79.82 | 22623 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 85 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 2–3] | rule | PLACE | all_fields\|fav > 2.0\|rank 2–3 | look_ahead | 79.76 | 79.22 to 80.30 (95%) | 79.76 | 61376 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 86 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 2–3] | rule | PLACE | 8_plus\|fav > 2.0\|rank 2–3 | look_ahead | 79.70 | 79.17 to 80.25 (95%) | 79.71 | 60843 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 87 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank all others] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank all others | look_ahead | 79.10 | 75.26 to 83.14 (95%) | 79.53 | 23240 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 88 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 4–5] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 4–5 | look_ahead | 79.43 | 77.64 to 81.28 (95%) | 79.52 | 16547 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 89 | japan-c5-exotic-dividends/sp:win:cal:-:none[super_premium] | model | WIN | super_premium | look_ahead | 85.17 | 75.00 to 95.94 (95%) | 79.51 | 290 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 90 | japan-c5-exotic-dividends/sp:win:norm:-:none[super_premium] | model | WIN | super_premium | look_ahead | 85.17 | 75.00 to 95.94 (95%) | 79.51 | 290 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 91 | japan-c5-exotic-dividends/win:cal:-:none | model | WIN | all | look_ahead | 79.43 | 78.19 to 80.67 (95%) | 79.51 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 92 | japan-c5-exotic-dividends/win:norm:-:none | model | WIN | all | look_ahead | 79.43 | 78.19 to 80.67 (95%) | 79.51 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 93 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 6–8] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 6–8 | look_ahead | 77.10 | 68.18 to 86.41 (95%) | 79.44 | 2685 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 94 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 4–5] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 4–5 | look_ahead | 78.95 | 77.11 to 80.75 (95%) | 79.06 | 17123 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 95 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 79.76 | 76.70 to 82.87 (95%) | 78.68 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 96 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 79.83 | 76.64 to 83.02 (95%) | 78.67 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 97 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 3] | rule | PLACE | all_fields\|fav > 2.0\|rank 3 | look_ahead | 78.44 | 77.53 to 79.37 (95%) | 78.47 | 30252 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 98 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 3] | rule | PLACE | 8_plus\|fav > 2.0\|rank 3 | look_ahead | 78.37 | 77.45 to 79.29 (95%) | 78.41 | 29991 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 99 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 78.58 | 76.33 to 80.83 (95%) | 78.06 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 100 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 6–8] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 6–8 | look_ahead | 74.42 | 65.79 to 83.51 (95%) | 78.03 | 2809 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 101 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 78.37 | 76.53 to 80.23 (95%) | 78.03 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 102 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 6–8] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 6–8 | look_ahead | 77.76 | 75.34 to 80.12 (95%) | 78.02 | 24826 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 103 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 78.30 | 76.39 to 80.20 (95%) | 77.94 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 104 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 78.37 | 76.16 to 80.60 (95%) | 77.89 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 105 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 78.24 | 76.33 to 80.13 (95%) | 77.89 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 106 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank all others] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank all others | look_ahead | 77.28 | 73.92 to 80.67 (95%) | 77.84 | 32963 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 107 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 78.13 | 76.31 to 79.96 (95%) | 77.81 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 108 | japan-c5-exotic-dividends/trio:cal:hen:none | model | TRIO | all | look_ahead | 78.00 | 74.77 to 81.23 (95%) | 77.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 109 | japan-c5-exotic-dividends/trio:cal:harv:none | model | TRIO | all | look_ahead | 77.91 | 74.69 to 81.14 (95%) | 77.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 110 | japan-c5-exotic-dividends/trio:norm:harv:none | model | TRIO | all | look_ahead | 77.82 | 74.59 to 81.08 (95%) | 77.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 111 | japan-c5-exotic-dividends/trio:norm:hen:none | model | TRIO | all | look_ahead | 77.80 | 74.58 to 81.04 (95%) | 77.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 112 | japan-c5-exotic-dividends/trio:norm:qc:none | model | TRIO | all | look_ahead | 77.76 | 74.52 to 81.01 (95%) | 77.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 113 | japan-c5-exotic-dividends/sp:trio:cal:harv:none[super_premium] | model | TRIO | super_premium | look_ahead | 72.93 | 51.96 to 94.47 (95%) | 77.75 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 114 | japan-c5-exotic-dividends/sp:trio:cal:hen:none[super_premium] | model | TRIO | super_premium | look_ahead | 72.93 | 51.96 to 94.47 (95%) | 77.75 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 115 | japan-c5-exotic-dividends/sp:trio:norm:harv:none[super_premium] | model | TRIO | super_premium | look_ahead | 72.93 | 51.96 to 94.47 (95%) | 77.75 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 116 | japan-c5-exotic-dividends/sp:trio:norm:hen:none[super_premium] | model | TRIO | super_premium | look_ahead | 72.93 | 51.96 to 94.47 (95%) | 77.75 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 117 | japan-c5-exotic-dividends/sp:trio:norm:qc:none[super_premium] | model | TRIO | super_premium | look_ahead | 72.93 | 51.96 to 94.47 (95%) | 77.75 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 118 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank all others] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank all others | look_ahead | 76.99 | 73.74 to 80.31 (95%) | 77.55 | 34064 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 119 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 4–5] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 4–5 | look_ahead | 75.05 | 68.29 to 81.81 (95%) | 77.47 | 1972 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 120 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 6–8] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 6–8 | look_ahead | 77.16 | 74.85 to 79.52 (95%) | 77.45 | 25297 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 121 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.59 | 75.79 to 79.34 (95%) | 77.32 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 122 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.84 | 75.30 to 80.44 (95%) | 77.26 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 123 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.79 | 75.24 to 80.39 (95%) | 77.22 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 124 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 4–5] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 4–5 | look_ahead | 74.61 | 68.12 to 81.69 (95%) | 77.21 | 1792 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 125 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 77.86 | 75.02 to 80.69 (95%) | 77.18 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 126 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 77.43 | 75.60 to 79.22 (95%) | 77.15 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 127 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.64 | 75.17 to 80.16 (95%) | 77.12 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 128 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:final_look_ahead/comparator | comparator | TRIO | all | look_ahead | 77.11 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 129 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.59 | 75.12 to 80.12 (95%) | 77.08 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 130 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 78.63 | 74.31 to 83.12 (95%) | 77.04 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 131 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|all | cell | FORECAST | all | look_ahead | 77.16 | 75.89 to 78.43 (95%) | 77.03 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 132 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 77.62 | 74.80 to 80.38 (95%) | 76.99 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 133 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 79.31 | 73.91 to 84.70 (95%) | 76.97 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 134 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 79.26 | 73.85 to 84.65 (95%) | 76.94 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 135 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 77.21 | 75.30 to 79.07 (95%) | 76.93 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 136 | japan-c5-exotic-dividends/place:norm:qc:none:stat:drop | model | PLACE | all | look_ahead | 76.82 | 75.96 to 77.69 (95%) | 76.87 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 137 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|all | cell | FORECAST | all | look_ahead | 76.93 | 75.69 to 78.20 (95%) | 76.81 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 138 | japan-c5-exotic-dividends/place:cal:hen:none:stat:drop | model | PLACE | all | look_ahead | 76.76 | 75.90 to 77.62 (95%) | 76.81 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 139 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 77.04 | 75.26 to 78.76 (95%) | 76.80 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 140 | japan-c5-exotic-dividends/place:norm:hen:none:stat:drop | model | PLACE | all | look_ahead | 76.75 | 75.88 to 77.61 (95%) | 76.79 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 141 | japan-c5-exotic-dividends/place:cal:harv:none:stat:drop | model | PLACE | all | look_ahead | 76.74 | 75.88 to 77.60 (95%) | 76.79 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 142 | japan-c5-exotic-dividends/exacta:norm:hen:none | model | FORECAST | all | look_ahead | 77.46 | 74.47 to 80.50 (95%) | 76.77 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 143 | japan-c5-exotic-dividends/exacta:cal:harv:none | model | FORECAST | all | look_ahead | 77.44 | 74.43 to 80.46 (95%) | 76.75 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 144 | japan-c5-exotic-dividends/exacta:cal:hen:none | model | FORECAST | all | look_ahead | 77.42 | 74.41 to 80.44 (95%) | 76.73 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 145 | japan-c5-exotic-dividends/exacta:norm:harv:none | model | FORECAST | all | look_ahead | 77.41 | 74.40 to 80.46 (95%) | 76.72 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 146 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 76.91 | 75.10 to 78.67 (95%) | 76.67 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 147 | japan-c5-exotic-dividends/place:cal:qc:none:stat:drop | model | PLACE | all | look_ahead | 76.62 | 75.75 to 77.48 (95%) | 76.66 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 148 | japan-c5-exotic-dividends/place:norm:harv:none:stat:drop | model | PLACE | all | look_ahead | 76.57 | 75.71 to 77.44 (95%) | 76.62 | 18087 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 149 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 76.84 | 75.01 to 78.66 (95%) | 76.60 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 150 | japan-c5-exotic-dividends/exacta:norm:qc:none | model | FORECAST | all | look_ahead | 77.27 | 74.26 to 80.31 (95%) | 76.60 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 151 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 76.78 | 74.94 to 78.61 (95%) | 76.54 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 152 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 77.00 | 74.47 to 79.56 (95%) | 76.53 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 153 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 77.86 | 73.64 to 82.29 (95%) | 76.52 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 154 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 76.75 | 74.86 to 78.60 (95%) | 76.50 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 155 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 76.92 | 74.39 to 79.47 (95%) | 76.46 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 156 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 76.52 | 74.75 to 78.31 (95%) | 76.31 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 157 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 4–5] | rule | PLACE | 8_plus\|fav > 2.0\|rank 4–5 | look_ahead | 76.23 | 75.45 to 77.02 (95%) | 76.27 | 60099 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 158 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 4–5] | rule | PLACE | all_fields\|fav > 2.0\|rank 4–5 | look_ahead | 76.20 | 75.42 to 76.98 (95%) | 76.24 | 60627 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 159 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.99 | 74.06 to 77.87 (95%) | 75.78 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 160 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 75.93 | 74.20 to 77.66 (95%) | 75.76 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 161 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.83 | 74.58 to 77.06 (95%) | 75.75 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 162 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 6–8] | rule | PLACE | 8_plus\|fav > 2.0\|rank 6–8 | look_ahead | 75.67 | 74.72 to 76.55 (95%) | 75.73 | 90208 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 163 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 77.66 | 71.46 to 83.77 (95%) | 75.62 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 164 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 6–8] | rule | PLACE | all_fields\|fav > 2.0\|rank 6–8 | look_ahead | 75.52 | 74.57 to 76.41 (95%) | 75.58 | 90649 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 165 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.75 | 73.81 to 77.63 (95%) | 75.56 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 166 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank all others] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank all others | look_ahead | 72.57 | 66.72 to 78.87 (95%) | 75.46 | 10340 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 167 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.81 | 73.16 to 78.49 (95%) | 75.46 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 168 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 75.46 | 74.16 to 76.75 (95%) | 75.38 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 169 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.42 | 74.22 to 76.61 (95%) | 75.35 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 170 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.69 | 73.07 to 78.34 (95%) | 75.35 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 171 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|all | cell | FORECAST | all | look_ahead | 75.36 | 74.38 to 76.34 (95%) | 75.31 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 172 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.82 | 72.60 to 79.09 (95%) | 75.31 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 173 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank all others] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank all others | look_ahead | 72.45 | 66.74 to 78.66 (95%) | 75.30 | 10824 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 174 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 75.78 | 72.56 to 79.06 (95%) | 75.28 | 7616 races | 84 | jra | no depth table yet (pool-depth run) |
+| 175 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 75.35 | 74.01 to 76.70 (95%) | 75.27 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 176 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|all | cell | FORECAST | all | look_ahead | 75.38 | 73.65 to 77.14 (95%) | 75.24 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 177 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|all | cell | FORECAST | all | look_ahead | 75.33 | 73.60 to 77.09 (95%) | 75.19 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 178 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 75.24 | 73.72 to 76.81 (95%) | 75.14 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 179 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.20 | 73.81 to 76.60 (95%) | 75.11 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 180 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 76.69 | 70.44 to 82.75 (95%) | 75.07 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 181 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 75.10 | 73.54 to 76.72 (95%) | 74.99 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 182 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 74.97 | 73.71 to 76.23 (95%) | 74.91 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 183 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.15 | 72.63 to 77.77 (95%) | 74.89 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 184 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 75.29 | 72.04 to 78.63 (95%) | 74.87 | 10978 races | 42 | jra | no depth table yet (pool-depth run) |
+| 185 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 75.07 | 72.56 to 77.68 (95%) | 74.82 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 186 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|all | cell | FORECAST | all | look_ahead | 74.75 | 73.82 to 75.70 (95%) | 74.72 | 23629 races | 84 | jra | no depth table yet (pool-depth run) |
+| 187 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 74.76 | 73.40 to 76.14 (95%) | 74.69 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 188 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 74.74 | 73.47 to 76.04 (95%) | 74.68 | 11870 races | 84 | jra | no depth table yet (pool-depth run) |
+| 189 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.96 | 72.04 to 77.90 (95%) | 74.66 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 190 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 74.58 | 73.25 to 75.93 (95%) | 74.52 | 10375 races | 84 | jra | no depth table yet (pool-depth run) |
+| 191 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.93 | 71.24 to 78.89 (95%) | 74.47 | 7939 races | 42 | jra | no depth table yet (pool-depth run) |
+| 192 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 74.51 | 73.04 to 76.02 (95%) | 74.44 | 11070 races | 84 | jra | no depth table yet (pool-depth run) |
+| 193 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 74.73 | 71.59 to 77.88 (95%) | 74.43 | 12559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 194 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.73 | 71.54 to 78.06 (95%) | 74.41 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 195 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.68 | 71.50 to 78.02 (95%) | 74.37 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 196 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 83.80 | 66.70 to 102.90 (95%) | 74.36 | 189 races | 42 | jra | no depth table yet (pool-depth run) |
+| 197 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 74.38 | 72.88 to 75.93 (95%) | 74.31 | 10559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 198 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.49 | 71.56 to 77.46 (95%) | 74.25 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 199 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 75.25 | 69.13 to 81.46 (95%) | 74.24 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 200 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 74.45 | 71.53 to 77.43 (95%) | 74.22 | 7939 races | 84 | jra | no depth table yet (pool-depth run) |
+| 201 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 75.18 | 69.03 to 81.40 (95%) | 74.20 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 202 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.3\|rank 9+] | rule | PLACE | 8_plus\|fav ≤ 1.3\|rank 9+ | look_ahead | 59.84 | 48.12 to 72.72 (95%) | 74.16 | 4067 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 203 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.3\|rank 9+] | rule | PLACE | all_fields\|fav ≤ 1.3\|rank 9+ | look_ahead | 59.84 | 48.12 to 72.72 (95%) | 74.16 | 4067 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 204 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 74.15 | 72.84 to 75.49 (95%) | 74.11 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 205 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 74.02 | 71.93 to 76.10 (95%) | 73.93 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 206 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 90.01 | 63.01 to 119.98 (95%) | 73.90 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 207 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 89.69 | 62.82 to 119.57 (95%) | 73.89 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 208 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 74.04 | 71.22 to 76.85 (95%) | 73.88 | 5449 races | 84 | jra | no depth table yet (pool-depth run) |
+| 209 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 74.23 | 69.53 to 79.09 (95%) | 73.82 | 3820 races | 42 | jra | no depth table yet (pool-depth run) |
+| 210 | japan-c5-exotic-dividends/sp:exacta:norm:harv:none[super_premium] | model | FORECAST | super_premium | look_ahead | 82.08 | 59.75 to 104.91 (95%) | 73.73 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 211 | japan-c5-exotic-dividends/sp:exacta:cal:harv:none[super_premium] | model | FORECAST | super_premium | look_ahead | 81.96 | 59.50 to 105.25 (95%) | 73.70 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 212 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 73.62 | 71.60 to 75.61 (95%) | 73.56 | 2923 races | 84 | jra | no depth table yet (pool-depth run) |
+| 213 | japan-c5-exotic-dividends/sp:exacta:cal:hen:none[super_premium] | model | FORECAST | super_premium | look_ahead | 79.37 | 56.85 to 102.57 (95%) | 73.47 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 214 | japan-c5-exotic-dividends/sp:exacta:norm:hen:none[super_premium] | model | FORECAST | super_premium | look_ahead | 79.37 | 56.85 to 102.57 (95%) | 73.47 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 215 | japan-c5-exotic-dividends/sp:exacta:norm:qc:none[super_premium] | model | FORECAST | super_premium | look_ahead | 79.37 | 56.85 to 102.57 (95%) | 73.47 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 216 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 73.39 | 71.00 to 75.83 (95%) | 73.34 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 217 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 73.33 | 70.94 to 75.76 (95%) | 73.28 | 12559 races | 84 | jra | no depth table yet (pool-depth run) |
+| 218 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 167.26 | 70.24 to 315.23 (95%) | 73.21 | 189 races | 42 | jra | no depth table yet (pool-depth run) |
+| 219 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 73.05 | 70.47 to 75.66 (95%) | 73.03 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 220 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 75.03 | 46.60 to 105.94 (95%) | 73.01 | 189 races | 42 | jra | no depth table yet (pool-depth run) |
+| 221 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 72.98 | 70.41 to 75.60 (95%) | 72.97 | 10978 races | 84 | jra | no depth table yet (pool-depth run) |
+| 222 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.96 | 70.18 to 75.86 (95%) | 72.95 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 223 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 72.96 | 68.46 to 77.73 (95%) | 72.94 | 7616 races | 42 | jra | no depth table yet (pool-depth run) |
+| 224 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank all others] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank all others | look_ahead | 72.43 | 71.08 to 73.79 (95%) | 72.64 | 103129 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 225 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 72.54 | 69.25 to 75.96 (95%) | 72.60 | 10375 races | 42 | jra | no depth table yet (pool-depth run) |
+| 226 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank all others] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank all others | look_ahead | 72.31 | 70.97 to 73.64 (95%) | 72.51 | 104760 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 227 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.34 | 69.63 to 75.17 (95%) | 72.42 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 228 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.22 | 68.37 to 76.13 (95%) | 72.37 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 229 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 72.19 | 68.36 to 76.11 (95%) | 72.35 | 3820 races | 84 | jra | no depth table yet (pool-depth run) |
+| 230 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 66.51 | 45.85 to 88.45 (95%) | 72.25 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 231 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|headline | cell | FORECAST | headline | look_ahead | 70.31 | 60.22 to 80.91 (95%) | 72.07 | 2923 races | 42 | jra | no depth table yet (pool-depth run) |
+| 232 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|all | cell | FORECAST | all | look_ahead | 71.91 | 69.71 to 74.22 (95%) | 72.00 | 23629 races | 42 | jra | no depth table yet (pool-depth run) |
+| 233 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 70.71 | 62.71 to 79.51 (95%) | 71.98 | 2092 races | 42 | jra | no depth table yet (pool-depth run) |
+| 234 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.4–1.5\|rank 9+] | rule | PLACE | 8_plus\|fav 1.4–1.5\|rank 9+ | look_ahead | 64.66 | 57.17 to 72.62 (95%) | 71.96 | 9334 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 235 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.4–1.5\|rank 9+] | rule | PLACE | all_fields\|fav 1.4–1.5\|rank 9+ | look_ahead | 64.66 | 57.17 to 72.62 (95%) | 71.96 | 9334 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 236 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | FORECAST | fav_odds:ge5.0 | look_ahead | 63.33 | 43.69 to 84.20 (95%) | 71.85 | 189 races | 84 | jra | no depth table yet (pool-depth run) |
+| 237 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank all others] | rule | PLACE | 8_plus\|fav > 2.0\|rank all others | look_ahead | 71.57 | 70.97 to 72.18 (95%) | 71.61 | 402830 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 238 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank all others] | rule | PLACE | all_fields\|fav > 2.0\|rank all others | look_ahead | 71.56 | 70.96 to 72.16 (95%) | 71.60 | 404332 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 239 | japan-131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 70.19 | 65.66 to 74.84 (95%) | 70.99 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 240 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|headline | cell | FORECAST | headline | look_ahead | 68.81 | 61.79 to 76.45 (95%) | 70.91 | 2923 races | 42 | jra | no depth table yet (pool-depth run) |
+| 241 | japan-131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:open | cell | FORECAST | class:open | look_ahead | 69.81 | 65.28 to 74.40 (95%) | 70.71 | 2092 races | 84 | jra | no depth table yet (pool-depth run) |
+| 242 | japan-coplacer-place-e15/step1:8_plus:raw[fav ≤ 1.5\|rank 9+] | rule | PLACE | 8_plus\|fav ≤ 1.5\|rank 9+ | look_ahead | 63.20 | 56.73 to 70.11 (95%) | 69.85 | 13401 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 243 | japan-coplacer-place-e15/step1:all_fields:raw[fav ≤ 1.5\|rank 9+] | rule | PLACE | all_fields\|fav ≤ 1.5\|rank 9+ | look_ahead | 63.20 | 56.73 to 70.11 (95%) | 69.85 | 13401 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 244 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 69.14 | 65.79 to 72.61 (95%) | 69.84 | 11870 races | 42 | jra | no depth table yet (pool-depth run) |
+| 245 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 69.12 | 65.72 to 72.62 (95%) | 69.84 | 5449 races | 42 | jra | no depth table yet (pool-depth run) |
+| 246 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:open | cell | FORECAST | class:open | look_ahead | 63.56 | 53.72 to 73.83 (95%) | 69.78 | 2092 races | 42 | jra | no depth table yet (pool-depth run) |
+| 247 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 66.08 | 58.74 to 73.78 (95%) | 69.68 | 3820 races | 42 | jra | no depth table yet (pool-depth run) |
+| 248 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 68.70 | 65.54 to 71.95 (95%) | 69.41 | 11070 races | 42 | jra | no depth table yet (pool-depth run) |
+| 249 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 68.62 | 65.35 to 71.97 (95%) | 69.38 | 10559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 250 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:open | cell | FORECAST | class:open | look_ahead | 66.76 | 61.23 to 72.37 (95%) | 69.09 | 2092 races | 42 | jra | no depth table yet (pool-depth run) |
+| 251 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 65.45 | 60.57 to 70.62 (95%) | 67.93 | 10978 races | 42 | jra | no depth table yet (pool-depth run) |
+| 252 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 65.04 | 59.85 to 70.56 (95%) | 67.88 | 7616 races | 42 | jra | no depth table yet (pool-depth run) |
+| 253 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 65.15 | 60.35 to 70.33 (95%) | 67.70 | 11870 races | 42 | jra | no depth table yet (pool-depth run) |
+| 254 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:final_look_ahead/comparator | comparator | TIERCE | all | look_ahead | 67.67 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 255 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 65.28 | 60.70 to 70.09 (95%) | 67.59 | 12559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 256 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 64.37 | 59.36 to 69.70 (95%) | 67.32 | 10375 races | 42 | jra | no depth table yet (pool-depth run) |
+| 257 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 63.04 | 58.31 to 68.01 (95%) | 66.17 | 10559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 258 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 62.99 | 58.39 to 67.75 (95%) | 65.98 | 11070 races | 42 | jra | no depth table yet (pool-depth run) |
+| 259 | japan-coplacer-place-e15/step1:8_plus:raw[fav > 2.0\|rank 9+] | rule | PLACE | 8_plus\|fav > 2.0\|rank 9+ | look_ahead | 65.59 | 64.31 to 66.90 (95%) | 65.93 | 191680 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 260 | japan-coplacer-place-e15/step1:all_fields:raw[fav > 2.0\|rank 9+] | rule | PLACE | all_fields\|fav > 2.0\|rank 9+ | look_ahead | 65.59 | 64.31 to 66.90 (95%) | 65.93 | 191680 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 261 | japan-c5-exotic-dividends/trifecta:norm:harv:none | model | TIERCE | all | look_ahead | 66.92 | 61.07 to 72.95 (95%) | 65.77 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 262 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|all | cell | FORECAST | all | look_ahead | 64.21 | 61.03 to 67.53 (95%) | 65.71 | 23629 races | 42 | jra | no depth table yet (pool-depth run) |
+| 263 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:final_look_ahead | rule | TIERCE | all | look_ahead | 65.58 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 264 | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:final_look_ahead | rule | TIERCE | all | look_ahead | 65.58 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 265 | japan-c5-exotic-dividends/trifecta:cal:harv:none | model | TIERCE | all | look_ahead | 66.63 | 60.80 to 72.67 (95%) | 65.51 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 266 | japan-c5-exotic-dividends/trifecta:cal:hen:none | model | TIERCE | all | look_ahead | 66.53 | 60.79 to 72.53 (95%) | 65.43 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 267 | japan-c5-exotic-dividends/trifecta:norm:qc:none | model | TIERCE | all | look_ahead | 66.52 | 60.66 to 72.51 (95%) | 65.41 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 268 | japan-c5-exotic-dividends/trifecta:norm:hen:none | model | TIERCE | all | look_ahead | 66.48 | 60.68 to 72.47 (95%) | 65.38 | 23871 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 269 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 61.89 | 57.23 to 66.81 (95%) | 65.33 | 7939 races | 42 | jra | no depth table yet (pool-depth run) |
+| 270 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|headline | cell | FORECAST | headline | look_ahead | 58.95 | 53.33 to 65.14 (95%) | 64.63 | 2923 races | 42 | jra | no depth table yet (pool-depth run) |
+| 271 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 59.16 | 53.95 to 64.73 (95%) | 64.17 | 5449 races | 42 | jra | no depth table yet (pool-depth run) |
+| 272 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | FORECAST | fav_odds:3.0-4.9 | look_ahead | 62.50 | 59.55 to 65.67 (95%) | 64.13 | 7616 races | 42 | jra | no depth table yet (pool-depth run) |
+| 273 | japan-coplacer-place-e15/step1:8_plus:raw[fav 1.6–2.0\|rank 9+] | rule | PLACE | 8_plus\|fav 1.6–2.0\|rank 9+ | look_ahead | 62.27 | 59.52 to 65.06 (95%) | 63.98 | 45088 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 274 | japan-coplacer-place-e15/step1:all_fields:raw[fav 1.6–2.0\|rank 9+] | rule | PLACE | all_fields\|fav 1.6–2.0\|rank 9+ | look_ahead | 62.27 | 59.52 to 65.06 (95%) | 63.98 | 45088 bets | 6 | jra | no depth table yet (pool-depth run) |
+| 275 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:rest | cell | FORECAST | popularity:rest | look_ahead | 61.77 | 59.30 to 64.42 (95%) | 63.04 | 12559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 276 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:win1-3 | cell | FORECAST | class:win1-3 | look_ahead | 61.33 | 58.64 to 64.23 (95%) | 62.87 | 10978 races | 42 | jra | no depth table yet (pool-depth run) |
+| 277 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:11-14 | cell | FORECAST | field:11-14 | look_ahead | 59.05 | 55.77 to 62.60 (95%) | 61.64 | 7939 races | 42 | jra | no depth table yet (pool-depth run) |
+| 278 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:15-18 | cell | FORECAST | field:15-18 | look_ahead | 58.72 | 55.83 to 61.73 (95%) | 60.80 | 11870 races | 42 | jra | no depth table yet (pool-depth run) |
+| 279 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:5-10 | cell | FORECAST | field:5-10 | look_ahead | 55.74 | 51.40 to 60.11 (95%) | 60.41 | 3820 races | 42 | jra | no depth table yet (pool-depth run) |
+| 280 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:final_look_ahead/comparator | comparator | QUINELLA | all | card_only | 60.18 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 281 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_20:final_look_ahead | rule | QUINELLA | all | look_ahead | 60.15 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 282 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_10:final_look_ahead | rule | QUINELLA | all | look_ahead | 60.01 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 283 | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:final_look_ahead | rule | QUINELLA | all | look_ahead | 59.93 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 284 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | FORECAST | fav_odds:2.0-2.9 | look_ahead | 57.70 | 54.96 to 60.50 (95%) | 59.70 | 10375 races | 42 | jra | no depth table yet (pool-depth run) |
+| 285 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | FORECAST | fav_odds:le1.9 | look_ahead | 52.89 | 48.07 to 57.93 (95%) | 59.38 | 5449 races | 42 | jra | no depth table yet (pool-depth run) |
+| 286 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|all | cell | FORECAST | all | look_ahead | 58.35 | 56.45 to 60.34 (95%) | 59.36 | 23629 races | 42 | jra | no depth table yet (pool-depth run) |
+| 287 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:less | cell | FORECAST | popularity:less | look_ahead | 54.47 | 51.50 to 57.65 (95%) | 57.37 | 11070 races | 42 | jra | no depth table yet (pool-depth run) |
+| 288 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_100:final_look_ahead | rule | TRIO | all | look_ahead | 56.95 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 289 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_50:final_look_ahead | rule | TRIO | all | look_ahead | 56.94 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 290 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:final_look_ahead | rule | TRIO | all | look_ahead | 56.78 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 291 | japan-family-l-exotic-pool-choice/L4:same_bracket_vs_quinellas:card_only/comparator | comparator | QUINELLA | all | card_only | 56.71 | — | — | 41168 races | 18 | jra | no depth table yet (pool-depth run) |
+| 292 | japan-131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:maiden | cell | FORECAST | class:maiden | look_ahead | 53.59 | 50.59 to 56.78 (95%) | 56.66 | 10559 races | 42 | jra | no depth table yet (pool-depth run) |
+| 293 | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:final_look_ahead/comparator | comparator | TRIO | all | card_only | 53.50 | — | — | 43130 races | 18 | jra | no depth table yet (pool-depth run) |
+| 294 | japan-family-l-exotic-pool-choice/L4:same_bracket_vs_quinellas:card_only | rule | BRACKET_QUINELLA | all | card_only | 51.42 | — | — | 41168 races | 18 | jra | no depth table yet (pool-depth run) |
+| 295 | japan-c5-exotic-dividends/sp:trifecta:cal:harv:none[super_premium] | model | TIERCE | super_premium | look_ahead | 22.71 | 6.73 to 41.16 (95%) | 32.19 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 296 | japan-c5-exotic-dividends/sp:trifecta:cal:hen:none[super_premium] | model | TIERCE | super_premium | look_ahead | 22.71 | 6.73 to 41.16 (95%) | 32.19 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 297 | japan-c5-exotic-dividends/sp:trifecta:norm:harv:none[super_premium] | model | TIERCE | super_premium | look_ahead | 22.71 | 6.73 to 41.16 (95%) | 32.19 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 298 | japan-c5-exotic-dividends/sp:trifecta:norm:hen:none[super_premium] | model | TIERCE | super_premium | look_ahead | 22.71 | 6.73 to 41.16 (95%) | 32.19 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| 299 | japan-c5-exotic-dividends/sp:trifecta:norm:qc:none[super_premium] | model | TIERCE | super_premium | look_ahead | 22.71 | 6.73 to 41.16 (95%) | 32.19 | 443 bets | 249 | jra | no depth table yet (pool-depth run) |
+| — | exacta-own-impact/payout-identity | other | — | all | unknown | — | — | — | — | 1 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-breakage/breakage\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-breakage/breakage\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-b3-v3/b3\|lambda2=per_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-category-v2-max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 1 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-logscore-v2/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-logscore-v2/c\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-logscore-v3/c\|lambda2=per_fold | cell | — | all | unknown | — | — | — | — | 1 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-131-exacta-rule-v5/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.1\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.1\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.2\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.2\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.3\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.3\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.5\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-282-exacta-fav-first-avoidance-v2/cut=1.5\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/entropy_bins_clustered | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/power_beta_clustered:by_year_and_era:all_races | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/power_beta_clustered:by_year_and_era:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:R11pm1 | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:R12 | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:debut | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:field_16_plus | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:g1_day_undercard | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:handicap | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:heavy_going | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-beta-clustered-final-win/segment_clustered:venue | model | — | all | unknown | — | — | — | — | 11 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/board_vs_final:normalised | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/board_vs_final:power | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/board_vs_final:shin | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/drift_sd:late_card | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/drift_sd:low_turnover | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-board-quality-by-horizon/spurious_ev:by_pool_and_tau | model | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:horse | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:horse_x_course | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:horse_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:horse_x_trainer | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:trainer | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:trainer_x_debut | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/cells:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-04-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-07-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/fit:horse_aptitude:2024-10-01@56d0669 | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/horse_x_trainer:not_fitted | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/level1:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/level1:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/level1:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/level1:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/level1:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:base_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:horse_aptitude_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:horse_x_jockey_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:trainer_debut_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:trainer_x_track_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/marginal:stage2:transfer_step_vs_market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/meeting_clustered:stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/selection:rating_pair | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:calibrated_market | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:base | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:market_only | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tail:stage2:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tau:horse_aptitude | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tau:horse_x_jockey | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tau:trainer_debut | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tau:trainer_x_track | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win/tau:transfer_step | other | — | all | unknown | — | — | — | — | 162 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:horse | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:horse_x_course | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:horse_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:horse_x_trainer | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:trainer | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:trainer_x_debut | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/cells:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-04-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-07-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/fit:horse_aptitude:2024-10-01@56d0669 | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/horse_x_trainer:not_fitted | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/level1:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/level1:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/level1:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/level1:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/level1:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:base_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_aptitude_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_aptitude_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_x_jockey_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:horse_x_jockey_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_debut_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_debut_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_x_track_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:trainer_x_track_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:transfer_step_vs_base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/marginal:stage2:transfer_step_vs_market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/meeting_clustered:stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/selection:rating_pair | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/stage2:q:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:calibrated_market | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:base | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:market_only | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tail:stage2:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tau:horse_aptitude | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tau:horse_x_jockey | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tau:trainer_debut | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tau:trainer_x_track | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-interactions-final-win-v2/tau:transfer_step | other | — | all | unknown | — | — | — | — | 56 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-rating-final-win/correlation:ln_q | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-rating-final-win/meeting_clustered:stage2:q:rating | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-rating-final-win/member_alone:rating | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-rating-final-win/selection:inner_fold | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-c2-rating-final-win/stage2:q:rating | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-c4-meta-final-win/ceiling:calibrated_market | model | — | all | unknown | — | — | — | — | 38 | jra | no depth table yet (pool-depth run) |
+| — | japan-c4-meta-final-win/market:normalised | model | — | all | unknown | — | — | — | — | 38 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/e44:harv:cal | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/e44:hen:cal | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/exacta:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/exacta:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/exacta:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/exacta:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/exacta:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:cal:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/place:norm:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/quinella:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/quinella:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/quinella:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/quinella:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/quinella:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:exacta:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:exacta:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:exacta:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:exacta:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:exacta:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:cal:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:place:norm:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:quinella:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:quinella:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:quinella:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:quinella:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:quinella:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trifecta:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trifecta:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trifecta:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trifecta:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trifecta:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trio:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trio:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trio:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trio:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:trio:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:cal:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:cal:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:cal:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:cal:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:wide:norm:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:win:cal:-:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/sp:win:norm:-:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trifecta:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trifecta:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trifecta:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trifecta:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trifecta:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trio:cal:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trio:cal:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trio:norm:harv:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trio:norm:hen:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/trio:norm:qc:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:cal:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:cal:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:cal:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:cal:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:harv:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:harv:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:hen:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:hen:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:qc:lin:stat:bound | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/wide:norm:qc:lin:stat:drop | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/win:cal:-:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-c5-exotic-dividends/win:norm:-:lin | other | — | all | unknown | — | — | — | — | 249 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/normalised:all_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/normalised:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/power:all_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/power:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/shin:all_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/shin:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/spline:all_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-calibrated-market-final-win/spline:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan-coplacer-place-e15/step1:8_plus:odds_matched | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-coplacer-place-e15/step1:all_fields:odds_matched | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-coplacer-place-e15/step2:decision_time:T-2:ranks_2_3 | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-coplacer-place-e15/step3:mechanism:stake_back_share | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/entropy_bins | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/normalised:all_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/normalised:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/power:all_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/power:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/power_beta:by_year_and_era:all_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/power_beta:by_year_and_era:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:R11pm1 | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:R12 | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:debut | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:field_16_plus | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:g1_day_undercard | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:handicap | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:heavy_going | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/segment:venue | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/shin:all_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-crowd-calibration-final-win/shin:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 17 | jra | no depth table yet (pool-depth run) |
+| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:tail_count_strata | model | — | all | unknown | — | — | — | — | 3 | jra | no depth table yet (pool-depth run) |
+| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:tail_share | model | — | all | unknown | — | — | — | — | 3 | jra | no depth table yet (pool-depth run) |
+| — | japan-entropy-gradient-tail-conditioned/entropy_gradient:unconditioned | model | — | all | unknown | — | — | — | — | 3 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_10:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_20:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:QUINELLA:threshold_5:board_at_t | rule | QUINELLA | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_100:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_20:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L1:TRIO:threshold_50:board_at_t | rule | TRIO | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_box:board_at_t | rule | TIERCE | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L4:market_order_trifecta_vs_trio:board_at_t | rule | TIERCE | all | decision_time | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-exotic-pool-choice/L5:calendar_report | other | — | all | unknown | — | — | — | — | 18 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v2/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v3/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v4/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 50 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:QUINELLA_PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:QUINELLA_PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L2:WIN:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:FORECAST:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_101:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:PLACE:above_51:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:QUINELLA_PLACE:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TIERCE:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_13_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:TRIO:rank_9_or_worse:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_101:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L3:WIN:above_51:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:flattest_quintile:PLACE:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:FORECAST_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:PLACE:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_PLACE_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:QUINELLA_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TIERCE_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:TRIO_top3_box:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:board_at_t | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:board_at_t:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:final_look_ahead | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-family-l-floor-tail-favourite-v5/L7:handicap:WIN:final_look_ahead:walk_forward | other | — | all | unknown | — | — | — | — | 98 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/interim_par:V1:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/interim_par:V2:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/swap:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/swap:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/v96:V1:handicap_alone | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-handicap-speed-96-final-win/v96:V2:meld_over_market_v0 | other | — | all | unknown | — | — | — | — | 6 | jra | no depth table yet (pool-depth run) |
+| — | japan-same-day-bias-final-win/history_prior:pooled_coefficient | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-same-day-bias-final-win/history_prior:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-same-day-bias-final-win/posterior:pooled_coefficient | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-same-day-bias-final-win/posterior:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-same-day-bias-final-win/same_day_update:walk_forward_delta_ll | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t1-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t16-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t2-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t2-race | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t30-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t5-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/calibration-win-t60-meeting | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/drift-win-lag11 | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/drift-win-lag14 | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/drift-win-lag3 | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/hand-played-bets | other | — | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-shadow-calibration-v1/pick-rule-q05-t2 | rule | WIN | all | unknown | — | — | — | — | 12 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3/normal:variant_off_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3/normal:variant_on_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3/t5:variant_off_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3/t5:variant_on_vs_par_only | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:both:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:both:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:both:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:both:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:other_surface:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:other_surface:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:other_surface:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:other_surface:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:previous_day:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:previous_day:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:previous_day:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/normal:previous_day:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:both:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:both:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:both:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:both:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:other_surface:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:other_surface:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:other_surface:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:other_surface:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:previous_day:variant_off_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:previous_day:variant_off_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:previous_day:variant_on_vs_par_only | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-prior/t5:previous_day:variant_on_vs_variant_on | other | — | all | unknown | — | — | — | — | 24 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-timing/normal:variant_off_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-timing/normal:variant_on_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-timing/t5:variant_off_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-speed-top3-c3-timing/t5:variant_on_vs_par_only:complete_timing | member | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-beta-final-win/tail_beta:by_year:all_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-beta-final-win/tail_beta:by_year:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-beta-final-win/tail_beta:walk_forward:all_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-beta-final-win/tail_beta:walk_forward:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-hinge-final-win/tail_hinge:by_year:all_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-hinge-final-win/tail_hinge:by_year:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-hinge-final-win/tail_hinge:walk_forward:all_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-tail-hinge-final-win/tail_hinge:walk_forward:no_floor_bound_races | model | — | all | unknown | — | — | — | — | 4 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-day-sd/day-sd-estimates | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-day-sd/last-fold-variance-se-diagnostic | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-day-sd/per_level-predictive-vs-prior | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-day-sd/per_level-vs-pooled | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-day-sd/pooled-predictive-vs-prior | member | — | all | unknown | — | — | — | — | 5 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/all_138 | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/baseline | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/corner | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/corner+all_138 | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/obs_weights | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/obs_weights+fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/obs_weights+one_race_groups | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/one_race_groups | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-track-bias-null-diagnostic/one_race_groups+fitted_lam | member | — | all | unknown | — | — | — | — | 20 | jra | no depth table yet (pool-depth run) |
+| — | japan-v0-win-residual/segments-13-ridge-100 | model | — | all | unknown | — | — | — | — | 1 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-breakage/breakage\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-breakage/breakage\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v1/b1\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b1-v2/b1\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 42 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v1/b3\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-b3-v2/b3\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/b2\|lambda2=in_fold\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v1/max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=1.0\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_first\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|fav_second\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|all | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:maiden | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:open | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|class:win1-3 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:2.0-2.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:3.0-4.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:ge5.0 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|fav_odds:le1.9 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:11-14 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:15-18 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|field:5-10 | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|headline | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:less | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/b2\|lambda2=full_development\|no_fav\|popularity:rest | cell | — | all | unknown | — | — | — | — | 84 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-category-v2/max-test/spa+stepm | cell | — | all | unknown | — | — | — | — | 1 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-logscore-v1/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-logscore-v1/c\|lambda2=in_fold | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-logscore-v2/c\|lambda2=1.0 | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-logscore-v2/c\|lambda2=full_development | cell | — | all | unknown | — | — | — | — | 2 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v2/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/fav_second\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.6\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.6\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.7\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.7\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.8\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.8\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.9\|all | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/131-exacta-rule-v3/no_fav\|cut=0.9\|headline | cell | — | all | unknown | — | — | — | — | 16 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.1\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.1\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.2\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.2\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.3\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.3\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.5\|all | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | japan/282-exacta-fav-first-avoidance-v1/cut=1.5\|headline | other | — | all | unknown | — | — | — | — | 8 | jra | no depth table yet (pool-depth run) |
+| — | win5-rollover-v1/clopper-pearson 0.95 | other | — | all | unknown | — | — | — | — | 1 | netkeiba | no depth table yet (pool-depth run) |
 
 ## Descriptive, not ranked
 
-| Rank | Option | Kind | Pool | Segment | Selection | Pool value per ¥100 (descriptive) | CI | n | Variants searched | Sources |
-| ---: | --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | --- |
-| — | win5-carryover-v1/pool-level[carryover ratio 0..0.5] | cell | WIN5 | carryover ratio 0..0.5 | look_ahead | 81.64 | ≥ 80.20 (95%) | 7 days | 1 | netkeiba |
-| — | win5-carryover-v1/pool-level[carryover ratio 0.5..1] | cell | WIN5 | carryover ratio 0.5..1 | look_ahead | 94.93 | ≥ 93.00 (95%) | 6 days | 1 | netkeiba |
-| — | win5-carryover-v1/pool-level[carryover ratio 1..2] | cell | WIN5 | carryover ratio 1..2 | look_ahead | 105.93 | ≥ 104.58 (95%) | 4 days | 1 | netkeiba |
-| — | win5-carryover-v1/pool-level[carryover ratio 2..inf] | cell | WIN5 | carryover ratio 2..inf | look_ahead | — | — | — | 1 | netkeiba |
+| Rank | Option | Kind | Pool | Segment | Selection | Pool value per ¥100 (descriptive) | CI | n | Variants searched | Sources | Capacity (median ¥ per edge) |
+| ---: | --- | --- | --- | --- | --- | ---: | --- | ---: | ---: | --- | --- |
+| — | win5-carryover-v1/pool-level[carryover ratio 0..0.5] | cell | WIN5 | carryover ratio 0..0.5 | look_ahead | 81.64 | ≥ 80.20 (95%) | 7 days | 1 | netkeiba | no depth table yet (pool-depth run) |
+| — | win5-carryover-v1/pool-level[carryover ratio 0.5..1] | cell | WIN5 | carryover ratio 0.5..1 | look_ahead | 94.93 | ≥ 93.00 (95%) | 6 days | 1 | netkeiba | no depth table yet (pool-depth run) |
+| — | win5-carryover-v1/pool-level[carryover ratio 1..2] | cell | WIN5 | carryover ratio 1..2 | look_ahead | 105.93 | ≥ 104.58 (95%) | 4 days | 1 | netkeiba | no depth table yet (pool-depth run) |
+| — | win5-carryover-v1/pool-level[carryover ratio 2..inf] | cell | WIN5 | carryover ratio 2..inf | look_ahead | — | — | — | 1 | netkeiba | no depth table yet (pool-depth run) |
 
 ## Withheld (D21)
 
@@ -1568,6 +1774,76 @@ Public version: rows built on JRDB or JRA-VAN, or marked licensed, are withheld 
 - `japan-c4-meta-final-win/stage2:q:clogit_no_jrdb` (family `japan-c4-meta-final-win`)
 - `japan-c4-meta-final-win/stage2:q:form` (family `japan-c4-meta-final-win`)
 - `japan-c4-meta-final-win/stage2:q:lgbm_no_jrdb` (family `japan-c4-meta-final-win`)
+- `japan-c5-exotic-dividends/e44:harv:form` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/e44:hen:form` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/exacta:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/exacta:form:harv:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/exacta:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/exacta:form:hen:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:harv:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:harv:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:harv:none:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:harv:none:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:hen:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:hen:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:hen:none:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/place:form:hen:none:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/quinella:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/quinella:form:harv:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/quinella:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/quinella:form:hen:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:exacta:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:exacta:form:harv:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:exacta:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:exacta:form:hen:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:harv:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:harv:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:harv:none:stat:bound[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:harv:none:stat:drop[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:hen:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:hen:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:hen:none:stat:bound[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:place:form:hen:none:stat:drop[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:quinella:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:quinella:form:harv:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:quinella:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:quinella:form:hen:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trifecta:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trifecta:form:harv:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trifecta:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trifecta:form:hen:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trio:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trio:form:harv:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trio:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:trio:form:hen:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:harv:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:harv:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:harv:none:stat:bound[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:harv:none:stat:drop[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:hen:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:hen:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:hen:none:stat:bound[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:wide:form:hen:none:stat:drop[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:win:form:-:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/sp:win:form:-:none[super_premium]` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trifecta:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trifecta:form:harv:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trifecta:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trifecta:form:hen:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trio:form:harv:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trio:form:harv:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trio:form:hen:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/trio:form:hen:none` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:harv:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:harv:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:harv:none:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:harv:none:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:hen:lin:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:hen:lin:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:hen:none:stat:bound` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/wide:form:hen:none:stat:drop` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/win:form:-:lin` (family `japan-c5-exotic-dividends`)
+- `japan-c5-exotic-dividends/win:form:-:none` (family `japan-c5-exotic-dividends`)
 - `japan-cross-pool-t2-trial/offset:calibrated/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-trial`)
 - `japan-cross-pool-t2-trial/offset:calibrated/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-trial`)
 - `japan-cross-pool-t2-trial/offset:calibrated/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-trial`)
@@ -3498,6 +3774,971 @@ Public version: rows built on JRDB or JRA-VAN, or marked licensed, are withheld 
 - `japan-cross-pool-t2-v1/x_cross:normalised/WIN/value/maiden` (family `japan-cross-pool-t2-v1`)
 - `japan-cross-pool-t2-v1/x_cross:normalised/WIN/value/newcomer` (family `japan-cross-pool-t2-v1`)
 - `japan-cross-pool-t2-v1/x_cross:normalised/WIN/value/open` (family `japan-cross-pool-t2-v1`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:calibrated/WIN/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:normalised/WIN/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/offset:quinella/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/pair:quinella/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:calibrated/WIN/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross+fav:normalised/WIN/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:calibrated/WIN/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/FORECAST/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/QUINELLA/value/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/all/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/conditions/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/graded/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/maiden/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/newcomer/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0-0.5` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0.5-0.75` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0.75-0.9` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0.9-0.95` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0.95-0.99` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/n5/open/claim q0.99-1` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/top1/open` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/all` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/conditions` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/graded` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/maiden` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/newcomer` (family `japan-cross-pool-t2-v2`)
+- `japan-cross-pool-t2-v2/x_cross:normalised/WIN/value/open` (family `japan-cross-pool-t2-v2`)
 - `japan-debut-maiden-members-v1/combined:DEBUT` (family `japan-debut-maiden-members-v1`)
 - `japan-debut-maiden-members-v1/combined:MAIDEN` (family `japan-debut-maiden-members-v1`)
 - `japan-debut-maiden-members-v1/member:ability:DEBUT` (family `japan-debut-maiden-members-v1`)
@@ -15537,6 +16778,7 @@ Public version: rows built on JRDB or JRA-VAN, or marked licensed, are withheld 
 - `japan-n8-spread-scan-wide/spread-scan:t2:wide:box2-5:surface:turf` (family `japan-n8-spread-scan-wide`)
 - `japan-n8-spread-scan-wide/t2` (family `japan-n8-spread-scan-wide`)
 - `japan-pool-depth-coplacer-v2/co-placer` (family `japan-pool-depth-coplacer-v2`)
+- `japan-pool-depth-exotics-v1/depth` (family `japan-pool-depth-exotics-v1`)
 - `japan-pool-depth-v1/co-placer` (family `japan-pool-depth-v1`)
 - `japan-pool-depth-v1/depth` (family `japan-pool-depth-v1`)
 - `japan-pool-depth-v1/exacta-own-impact` (family `japan-pool-depth-v1`)
