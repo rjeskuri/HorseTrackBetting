@@ -12,6 +12,11 @@ A point with a key already in the log is not decided again, so a restart writes 
 day ends once the last race's last point is due (16:45 Asia/Tokyo without post times), and the log
 is then sealed.
 
+A record is `live` when it is written within max_lag_s of its decision time and before the post
+scheduled at the decision; otherwise `replay` (a record written at or after the post never is live).
+A written record is never rewritten when a post moves: the summary's `on_time` re-judges the live
+records of this run against each race's latest known post.
+
 Ladder log (#628): given `ladder_log`, the run also writes the day's ladder log
 (`shadow.ladder_log.LadderDay`: each ladder checkpoint's observed odds and projections, each key's
 final). The shadow log is written and sealed exactly as without it; the run then goes on polling
@@ -116,6 +121,7 @@ class ShadowSummary:
     no_board: int
     races: int
     sealed: bool
+    on_time: int = 0  # live records written before their race's latest known post
 
 
 # ---------------------------------------------------------------- per race, what its points need
@@ -289,14 +295,18 @@ class _Settings:
     probe_until: datetime | None  # shadow_feed._probe_until of the day: the opening's coverage
 
 
-def _common(race_id: str, tau: int, decision: datetime, written: datetime, s: _Settings) -> dict:
+def _common(
+    race_id: str, tau: int, decision: datetime, post: datetime, written: datetime, s: _Settings
+) -> dict:
+    """The fields every record of a point shares. `live` needs the write within max_lag_s of the
+    decision and strictly before the post known at the decision."""
     lag = (written - decision).total_seconds()
     return {
         "race_id": race_id,
         "tau_min": tau,
         "decision_utc": _iso(decision),
         "written_utc": _iso(written),
-        "mode": "live" if lag <= s.max_lag_s else "replay",
+        "mode": "live" if lag <= s.max_lag_s and written < post else "replay",
         "git_sha": s.git_sha,
         "record_version": RECORD_VERSION,
     }
@@ -349,7 +359,8 @@ def _point_records(
     """The records of one grid point, and whether it is a no_board point."""
     decision = race.slots[tau][0]
     board = race.board(tau)
-    common = _common(race.race_id, tau, decision, written, s)
+    assert race.post is not None  # a point is only decided for a race with a post
+    common = _common(race.race_id, tau, decision, race.post, written, s)
     age = None if board is None else (decision - board.capture_utc).total_seconds()
     if board is None or age > s.max_board_age_s[tau]:
         record = {
@@ -508,6 +519,7 @@ def run_shadow_day(
     races: dict[str, _Race] = {}
     seq = 0
     records = no_board = 0
+    live: list[tuple[str, datetime, int]] = []  # (race, written, n) of each live point written
     done = {(key[0], key[3]) for key in shadow.logged_keys()}
     ladder: LadderDay | None = None
     if ladder_log is not None:
@@ -562,8 +574,16 @@ def run_shadow_day(
     def scheduled() -> int:
         return sum(r.post is not None for r in races.values())
 
+    def on_time() -> int:
+        """Live records written strictly before their race's latest known post."""
+        return sum(
+            n
+            for race_id, written, n in live
+            if (post := races[race_id].post) is not None and written < post
+        )
+
     def sealed_summary() -> ShadowSummary:
-        return ShadowSummary(records, no_board, scheduled(), True)
+        return ShadowSummary(records, no_board, scheduled(), True, on_time())
 
     shadow_open = not shadow.verify().sealed
     if not shadow_open and ladder is None:
@@ -585,10 +605,14 @@ def run_shadow_day(
             written = clock()
             batch: list[dict[str, Any]] = []
             empty = 0
+            lived: list[tuple[str, datetime, int]] = []
             for race, tau in due:
                 point, missing = _point_records(race, tau, written, settings)
                 batch.extend(point)
                 empty += missing
+                n_live = sum(r["mode"] == "live" for r in point)
+                if n_live:
+                    lived.append((race.race_id, written, n_live))
             try:
                 shadow.append(batch)
             except LogSealed:
@@ -598,6 +622,7 @@ def run_shadow_day(
                 race.decided(tau)
                 done.add((race.race_id, tau))
             records += len(batch)
+            live.extend(lived)
             no_board += empty
             logger.info(
                 "shadow-day %s: %d points, %d records (%d no_board) at %s",
@@ -636,7 +661,7 @@ def run_shadow_day(
                     ladder_failed("seal")
                 return sealed_summary()
         if once:
-            return ShadowSummary(records, no_board, scheduled(), not shadow_open)
+            return ShadowSummary(records, no_board, scheduled(), not shadow_open, on_time())
         if shadow_open:
             sleep(poll_s)
         else:  # only the ladder's finals are still to come: poll until its end at the latest
