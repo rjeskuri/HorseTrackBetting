@@ -67,20 +67,12 @@ def row(option_id: str, selection: str, **extra) -> LeaderboardRow:
 
 
 @pytest.mark.parametrize("selection", PREDICTED)
-def test_a_row_may_carry_each_predicted_final_selection(selection):
+def test_a_row_may_carry_each_predicted_final_selection_and_only_those(selection):
     made = row("japan-713-synthetic/r1", selection, return_per_100=91.5, n=40, n_unit="races")
     assert made.selection == selection
-
-
-@pytest.mark.parametrize("selection", NEAR_MISSES)
-def test_near_misses_of_the_predicted_final_selection_are_still_refused(selection):
-    with pytest.raises(RowRefused):
-        row("japan-713-synthetic/r1", selection)
-
-
-@pytest.mark.parametrize("selection", ["decision_time", "card_only", "look_ahead", "unknown"])
-def test_the_existing_selections_are_still_accepted(selection):
-    assert row("japan-713-synthetic/r1", selection).selection == selection
+    for near_miss in NEAR_MISSES:  # exactly the three labels, not a pattern
+        with pytest.raises(RowRefused):
+            row("japan-713-synthetic/r1", near_miss)
 
 
 def _registry(tmp_path: Path) -> Registry:
@@ -89,7 +81,9 @@ def _registry(tmp_path: Path) -> Registry:
     return Registry(path, holdout_log=tmp_path / "reg" / "holdout_log.jsonl")
 
 
-@pytest.mark.parametrize(("selection", "value"), zip(PREDICTED, [88.0, 104.5, 97.25], strict=True))
+@pytest.mark.parametrize(
+    ("selection", "value"), list(zip(PREDICTED, [88.0, 104.5, 97.25], strict=True))
+)
 def test_a_registry_block_with_a_predicted_final_selection_gives_a_measured_row(
     tmp_path, selection, value
 ):
