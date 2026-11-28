@@ -11,7 +11,9 @@ A run's id is the sha256 hex of its record's canonical JSON: the same run twice 
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
 variant, status and per-fold metric, value, CI and n, with the values of licensed-source runs
-withheld.
+withheld. A record's ``notes`` (run metadata, such as why a measurement could not be made) are
+outside its variant identity and the summary; a record without notes is written without the key,
+so its line and id are those it had before ``notes`` existed.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +53,9 @@ __all__ = [
     "RegistryTampered",
     "RunRecord",
     "default_registry",
+    "is_licensed_record",
     "summary_dir",
+    "summary_stem",
     "write_summary",
 ]
 
@@ -60,7 +64,7 @@ WITHHELD_LABEL = "withheld (licensed source)"
 GENESIS = "0" * 64
 
 _HYPOTHESIS_ID = re.compile(r"[ELP][0-9]+")
-_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a family id that is a safe file stem
+_FAMILY_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a safe file stem
 _INDEX_STEM = "README"
 _PREAMBLE = (
     "# Experiment registry summary",
@@ -110,6 +114,7 @@ class RunRecord:
     status: str
     holdout_open: str | None = None
     owner_signoff: int | None = None
+    notes: dict[str, str] | None = None  # run metadata, outside the variant identity
 
 
 def _canonical(value: Any) -> str:
@@ -126,6 +131,16 @@ def _spec_hash(spec: dict) -> str:
     return hashlib.sha256(
         json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _record_data(record: RunRecord) -> dict:
+    """The record as its line holds it: ``asdict`` without ``notes`` when they are None, so a
+    record without notes has the id it had before the field existed, and an older line reads back
+    with notes None."""
+    data = asdict(record)
+    if data["notes"] is None:
+        del data["notes"]
+    return data
 
 
 def _record_from(data: dict) -> RunRecord:
@@ -155,6 +170,12 @@ def _licensed(record: RunRecord) -> bool:
     components = record.components if isinstance(record.components, dict) else {}
     named = [*builds, *components, *components.values()]
     return is_withheld(record.sources) or is_withheld(tuple(str(name) for name in named))
+
+
+def is_licensed_record(record: RunRecord) -> bool:
+    """Whether ``write_summary`` withholds the run's values: what ``_licensed`` returns, so other
+    readers (the leaderboard, #450) withhold exactly the runs the summary withholds."""
+    return _licensed(record)
 
 
 # --------------------------------------------------------------------------- validation
@@ -216,11 +237,32 @@ def _problem(r: RunRecord) -> str | None:
         return "an adopted run needs owner_signoff, the ticket where the owner signed adoption"
     if r.holdout_open is not None and not isinstance(r.holdout_open, str):
         return f"holdout_open must be a line hash (str), got {r.holdout_open!r}"
+    if r.notes is not None and not _names(r.notes):
+        return f"notes must be None or map names to strings, got {r.notes!r}"
     try:
-        if _record_from(json.loads(_canonical(asdict(r)))) != r:
+        if _record_from(json.loads(_canonical(_record_data(r)))) != r:
             return "the record would not read back unchanged (tuples or non-str keys in params?)"
     except (TypeError, ValueError) as exc:
         return f"the record is not plain JSON: {exc}"
+    return None
+
+
+def summary_stem(family_id: str) -> str | None:
+    """The stem of the family's summary file (each ``/`` of a legacy id mapped to ``--``), or
+    None when that is not a safe file stem or is the index's in any case (macOS ignores case)."""
+    stem = family_id.replace("/", "--")
+    if not _FAMILY_FILE.fullmatch(stem) or stem.casefold() == _INDEX_STEM.casefold():
+        return None
+    return stem
+
+
+def _unnameable(family_id: str) -> str | None:
+    """Why a new family id cannot be its own summary file name, or None."""
+    if summary_stem(family_id) != family_id:
+        return (
+            f"family_id {family_id!r} cannot be a summary file name: start with an ASCII letter "
+            f"or digit, then letters, digits, '.', '_' or '-', and not {_INDEX_STEM!r}"
+        )
     return None
 
 
@@ -233,6 +275,7 @@ class _Chain:
     runs: list[RunRecord] = field(default_factory=list)
     run_ids: set[str] = field(default_factory=set)
     freezes: dict[str, str] = field(default_factory=dict)
+    specs: dict[str, dict] = field(default_factory=dict)
 
 
 def _open_line(raw: bytes, number: int) -> dict:
@@ -274,12 +317,42 @@ def _parse(data: bytes) -> _Chain:
                 if spec_hash != _spec_hash(entry["spec"]) or family in chain.freezes:
                     raise ValueError("freeze")
                 chain.freezes[family] = spec_hash
+                chain.specs[family] = entry["spec"]
             else:
                 raise ValueError("kind")
         except (KeyError, TypeError, ValueError) as exc:
             raise RegistryTampered(f"line {number} is not a registry entry") from exc
         chain.head = _sha256(raw)
     return chain
+
+
+def variant_count(records: Iterable[RunRecord]) -> int:
+    """How many variants the family has tried, from its runs ``records``: its distinct run
+    specifications ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
+    feature-table identity of each data build (``_feature_tables``), compared as canonical
+    JSON so mapping key order does not matter. Each counts once whatever its status or number
+    of runs, failed ones included; a change to params, components, fold_scheme, sources or a
+    build's identity, or an added, removed or renamed build, is a new variant even under the
+    same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
+    holdout_open, notes, git_sha or ticket, or a refresh of the same builds) is another run in
+    ``records()``, not another variant. ``Registry.family_size`` is this over one family's runs.
+    """
+    return len(
+        {
+            _canonical(
+                [
+                    r.hypothesis_id,
+                    r.variant,
+                    r.fold_scheme,
+                    r.sources,
+                    r.components,
+                    r.params,
+                    _feature_tables(r.data_builds),
+                ]
+            )
+            for r in records
+        }
+    )
 
 
 class Registry:
@@ -299,10 +372,12 @@ class Registry:
 
     def append(self, record: RunRecord) -> str:
         """Add one run and return its id; ``RecordRefused`` (nothing written) when it breaks a
-        rule or is already in the registry."""
+        rule, is already in the registry, or its family id cannot name its summary file: not a
+        safe file stem as it is, ``README`` in any case, or the file (ignoring case) of another
+        family already in the registry."""
         if not isinstance(record, RunRecord):
             raise TypeError(f"append takes a RunRecord, got {type(record).__name__}")
-        problem = _problem(record)
+        problem = _problem(record) or _unnameable(record.family_id)
         if problem is None and record.holdout_open is not None:
             if record.holdout_open not in self._holdout_line_hashes():
                 problem = (
@@ -314,12 +389,18 @@ class Registry:
         if _licensed(record) and is_inside(self._path, env.repo_root()):
             raise LicensedOutputInRepo(f"the registry {self._path} is inside the repository")
 
-        data = asdict(record)
+        data = _record_data(record)
         run_id = _sha256(_canonical(data))
 
         def entry(chain: _Chain) -> dict:
             if run_id in chain.run_ids:
                 raise RecordRefused(f"run {run_id} is already in the registry")
+            name = record.family_id.casefold()
+            for other in {r.family_id for r in chain.runs} - {record.family_id}:
+                if (summary_stem(other) or "").casefold() == name:
+                    raise RecordRefused(
+                        f"family {record.family_id!r} would share its summary file with {other!r}"
+                    )
             return {"kind": "run", "run_id": run_id, "record": data}
 
         self._append(entry)
@@ -331,39 +412,18 @@ class Registry:
         return runs if family_id is None else [r for r in runs if r.family_id == family_id]
 
     def family_size(self, family_id: str) -> int:
-        """How many variants the family has tried: its distinct run specifications
-        ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
-        feature-table identity of each data build (``_feature_tables``), compared as canonical
-        JSON so mapping key order does not matter. Each counts once whatever its status or number
-        of runs, failed ones included; a change to params, components, fold_scheme, sources or a
-        build's identity, or an added, removed or renamed build, is a new variant even under the
-        same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
-        holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
-        ``records()``, not another variant.
-        """
-        return len(
-            {
-                _canonical(
-                    [
-                        r.hypothesis_id,
-                        r.variant,
-                        r.fold_scheme,
-                        r.sources,
-                        r.components,
-                        r.params,
-                        _feature_tables(r.data_builds),
-                    ]
-                )
-                for r in self.records(family_id)
-            }
-        )
+        """How many variants the family has tried; the rule is `variant_count`'s."""
+        return variant_count(self.records(family_id))
 
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's
         sorted, compact JSON). Freezing again with an equal spec is a no-op; another spec raises
-        ``FamilyAlreadyFrozen``."""
+        ``FamilyAlreadyFrozen``. ``RecordRefused`` when the family id cannot name a summary
+        file, as ``append`` refuses it."""
         if not _text(family_id):
             raise RecordRefused(f"family_id must be a non-blank string, got {family_id!r}")
+        if (problem := _unnameable(family_id)) is not None:
+            raise RecordRefused(problem)
         if not isinstance(spec, dict):
             raise TypeError(f"spec must be a dict, got {type(spec).__name__}")
         try:
@@ -392,6 +452,11 @@ class Registry:
 
     def frozen_spec_hash(self, family_id: str) -> str | None:
         return self._read().freezes.get(family_id)
+
+    def frozen_spec(self, family_id: str) -> dict | None:
+        """The family's frozen spec as stored (a fresh copy), or None when it is not frozen."""
+        spec = self._read().specs.get(family_id)
+        return None if spec is None else json.loads(_canonical(spec))
 
     def verify(self) -> None:
         """Raise ``RegistryTampered`` unless the file is the chain the registry wrote."""
@@ -433,14 +498,16 @@ class Registry:
             os.fsync(handle.fileno())
 
 
-def default_registry(country: str) -> Registry:
-    """The registry of ``country`` under the data directory, linked to its #71 holdout log."""
+def default_registry(country: str, *, create: bool = True) -> Registry:
+    """The registry of ``country`` under the data directory, linked to its #71 holdout log.
+    ``create=False`` leaves the registry folder uncreated (a reader of a fresh data root)."""
     if not (isinstance(country, str) and _COUNTRY.fullmatch(country)):
         raise ValueError(f"not a country name: {country!r}")
     if not (DEFAULT_COUNTRIES_DIR / country).is_dir():
         raise ValueError(f"no country folder for {country!r} under {DEFAULT_COUNTRIES_DIR}")
     path = paths.data_dir() / "registry" / f"{country}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
     return Registry(path, holdout_log=DEFAULT_COUNTRIES_DIR / country / LOG_NAME)
 
 
@@ -461,18 +528,39 @@ def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.6g}"
 
 
+def _summary_order(records: list[RunRecord]) -> list[RunRecord]:
+    """A family's runs as its summary lists them: the public runs in append order, then the
+    licensed-source runs sorted by their identity (variant, E id, status; append order only
+    between runs alike in all three), so neither when a licensed run was appended nor where it
+    fell among the public runs shows in the file (D21)."""
+    public = [r for r in records if not _licensed(r)]
+    licensed = [r for r in records if _licensed(r)]
+    return public + sorted(licensed, key=lambda r: (r.variant, r.hypothesis_id, r.status))
+
+
 def write_summary(registry: Registry, directory: Path | str) -> None:
     """Write the aggregate-only summary of ``registry`` into ``directory`` (normally
     ``summary_dir(country)``): one ``<family_id>.md`` per family, holding per run its E id,
     variant, status and per-fold metric, value, CI and n, and nothing else, and ``README.md``,
-    the index of the families. A licensed-source run shows only its identity and
-    ``withheld (licensed source)``. A family's file depends on that family's records alone."""
+    the index of the families. A legacy family id written before #525 has each ``/`` mapped to
+    ``--`` in its file name; its heading and index entry show the original id. ``ValueError``,
+    before any file is written, when a mapped name is still unsafe or ``README``, or two families
+    would share a file (ignoring case). A licensed-source run shows only its identity and
+    ``withheld (licensed source)``. A family's file depends on that family's records alone: its
+    public runs in append order, then its licensed-source runs in identity order, so the file
+    is the same whatever order those were appended in (a study may append them ranked)."""
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
         families.setdefault(record.family_id, []).append(record)
+    stems: dict[str, str] = {}
+    taken: dict[str, str] = {}
     for family in families:
-        if not _FAMILY_FILE.fullmatch(family) or family == _INDEX_STEM:
+        stem = summary_stem(family)
+        if stem is None:
             raise ValueError(f"family {family!r} cannot be a summary file name")
+        if (other := taken.setdefault(stem.casefold(), family)) != family:
+            raise ValueError(f"families {other!r} and {family!r} would share {stem}.md")
+        stems[family] = stem
 
     directory = Path(directory)
     for family, records in families.items():
@@ -484,7 +572,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
             "| E id | Variant | Status | Fold | Metric | Value | CI | n |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
-        for r in records:
+        for r in _summary_order(records):
             who = f"| {_cell(r.hypothesis_id)} | {_cell(r.variant)} | {_cell(r.status)} |"
             if _licensed(r):
                 lines.append(f"{who} {WITHHELD_LABEL} | | | | |")
@@ -495,7 +583,7 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
                 ci = "-" if m.lo is None and m.hi is None else f"[{_number(m.lo)}, {_number(m.hi)}]"
                 values = f"{_number(m.value)} | {ci} | {m.n}"
                 lines.append(f"{who} {_cell(m.fold)} | {_cell(m.metric)} | {values} |")
-        write_report(directory / f"{family}.md", "\n".join(lines) + "\n", sources=())
+        write_report(directory / f"{stems[family]}.md", "\n".join(lines) + "\n", sources=())
 
     index = [
         "# Experiment registry index",
@@ -504,5 +592,5 @@ def write_summary(registry: Registry, directory: Path | str) -> None:
         "per family, each holding that family's runs.",
         "",
     ]
-    index += [f"- [{family}]({family}.md)" for family in sorted(families)]
+    index += [f"- [{family}]({stems[family]}.md)" for family in sorted(families)]
     write_report(directory / f"{_INDEX_STEM}.md", "\n".join(index) + "\n", sources=())

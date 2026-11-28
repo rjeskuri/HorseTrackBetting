@@ -27,12 +27,14 @@ tables:
   # and runners.is_scratched come from the results page, so a race-day scratch or abandonment is
   # in the views from 00:00 JST. They stay under that rule until the owner decides whether they
   # need a post-based one (#227; docs/specs/as-of.md, "Accepted leak: results-derived card
-  # columns").
+  # columns"). `results_derived` lists them per table: the views are unchanged, the list only
+  # makes the leak machine-readable for the model boundary (#417, feature_boundary.approximations).
   meetings:
     kind: offset
     anchor: race_date
     tz: Asia/Tokyo
     offset_min: 0
+    results_derived: [status]
   races:
     kind: offset
     anchor: race_date
@@ -53,6 +55,7 @@ tables:
         anchor: post_utc
         offset_min: 30
     # field_size and status stay in the view: accepted leak (see above)
+    results_derived: [field_size, status]
     # the other results; result_published_utc and result_unpublished_utc (#225): never in a view
     # (owner decision, answer on #80, 2026-11-25). rail_setting stays in.
     label_columns:
@@ -78,6 +81,7 @@ tables:
         anchor: post_utc
         offset_min: 30
     # is_scratched stays in the view: accepted leak (see above)
+    results_derived: [is_scratched]
     # the other results
     label_columns:
       - placing_raw

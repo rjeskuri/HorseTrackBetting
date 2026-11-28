@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from horsetrack.core.config import Pool, SourceConfig, load_country_yaml, load_source
 
-ENABLED = {"WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE"}
+ENABLED = {"WIN", "PLACE", "BRACKET_QUINELLA", "QUINELLA", "QUINELLA_PLACE"}
 
 # Venue facts, written out independently of the YAML: code -> (netkeiba number, printed name).
 VENUES = {
@@ -74,7 +74,7 @@ def test_load_jra_source_config(jra, raw):
     assert raw["hosts"]["db"] == "https://db.netkeiba.com"
     assert raw["hosts"]["race"] == "https://race.netkeiba.com"
 
-    # the four pools are enabled, nothing else is; each pool knows its own code
+    # the five pools are enabled, nothing else is; each pool knows its own code
     assert {code for code, pool in jra.pools.items() if pool.enabled} == ENABLED
     for code, pool in jra.pools.items():
         assert pool.code == code
@@ -90,9 +90,17 @@ def test_load_jra_source_config(jra, raw):
 @pytest.mark.parametrize(
     ("code", "labels", "legs", "kind", "payout_rule", "takeout"),
     [
-        ("WIN", {"単勝", "WIN"}, 1, "win", "equal_split", 0.20),
+        ("WIN", {"単勝", "WIN"}, 1, "win", "stake_back_share", 0.20),
         ("PLACE", {"複勝", "PLACE"}, 1, "place", "stake_back_share", 0.20),
-        ("QUINELLA", {"馬連", "QUINELLA"}, 2, "unordered_top2", "equal_split", 0.225),
+        (
+            "BRACKET_QUINELLA",
+            {"枠連", "BRACKET QUINELLA"},
+            2,
+            "unordered_top2_bracket",
+            "stake_back_share",
+            0.225,
+        ),
+        ("QUINELLA", {"馬連", "QUINELLA"}, 2, "unordered_top2", "stake_back_share", 0.225),
         ("QUINELLA_PLACE", {"ワイド", "WIDE"}, 2, "any2_of_top3", "stake_back_share", 0.225),
     ],
 )
@@ -105,6 +113,29 @@ def test_enabled_pool_facts(jra, code, labels, legs, kind, payout_rule, takeout)
     assert pool.takeout == pytest.approx(takeout)
     assert pool.dividend_step == 10
     assert pool.min_dividend == 110
+
+
+# 04 §1.2 (競馬法 第8条): every JRA single-race pool pays a winning ticket its stake back plus
+# 1/P of the losers' money, P the number of winning combinations (owner, 2026-11-26, ticket #99).
+# WIN5 stays as it is: its carryover is #135's.
+SINGLE_RACE_POOLS = (
+    "WIN",
+    "PLACE",
+    "BRACKET_QUINELLA",
+    "QUINELLA",
+    "QUINELLA_PLACE",
+    "FORECAST",
+    "TRIO",
+    "TIERCE",
+)
+
+
+def test_every_single_race_pool_pays_stake_back_plus_a_share_of_the_losers(jra, raw):
+    rules = {code: jra.pools[code].payout_rule for code in (*SINGLE_RACE_POOLS, "WIN5")}
+    assert rules == {**dict.fromkeys(SINGLE_RACE_POOLS, "stake_back_share"), "WIN5": "equal_split"}
+    # jra.yaml carries the rule on each pool; the model's default is not what sets it.
+    written = {code: raw["pools"][code].get("payout_rule") for code in SINGLE_RACE_POOLS}
+    assert written == dict.fromkeys(SINGLE_RACE_POOLS, "stake_back_share")
 
 
 @pytest.mark.parametrize(
