@@ -112,6 +112,7 @@ GPT-6.2 Sol review round 5 of 2c73ca0, sections 13 to 16 below:
 from __future__ import annotations
 
 import copy
+import dataclasses
 import functools
 import hashlib
 import itertools
@@ -288,7 +289,7 @@ def _write_store(data: Path, races: list[dict]) -> None:
         for pos, horse in enumerate(order, start=1):
             runner_rows.append({"race_id": r["race_id"], "horse_no": horse,
                                 "win_odds": r["odds"][horse], "is_scratched": False,
-                                "finish_pos": pos})  # fmt: skip
+                                "finish_pos": pos, "dead_heat": False})  # fmt: skip
         dividend_rows.append({"race_id": r["race_id"], "pool": "FORECAST",
                               "combination": f"{r['winner'][0]},{r['winner'][1]}",
                               "dividend": float(r["dividend"]), "is_refund": False})  # fmt: skip
@@ -1914,3 +1915,425 @@ def test_breakage_counts_floor_dividends_and_adds_back_only_above_the_floor(load
                     assert floor[0].n == want["n_floor"], (fold, floor)
                 else:
                     assert floor == [], (fold, floor)
+
+
+# ---------------------------------------------------------------------------------------------
+# 17. #284: lambda2 refitted per walk-forward fold; B3 and C re-scored out of sample
+# ---------------------------------------------------------------------------------------------
+#
+# #131 scored B3 and C at #115's one full-development lambda2, a fit that saw the scored races.
+# ``score_per_fold`` scores them again with each race at the lambda2 of its own walk-forward fold,
+# fitted on that fold's training races alone, under two NEW frozen families (v3); the v2 rows
+# (``full_development``, partly in-sample) stay as they are. The pure parts (the per-fold fit, the
+# per-fold scoring frame, the v3 specs) are pinned in test_exacta_per_fold.py. Contract here:
+#
+# - ``exacta_run.score_per_fold(registry, races, meta, sha, fold_lambdas, *, n_boot=10000)``:
+#   ``RunRefused`` before anything is written unless both v3 families are frozen with the spec in
+#   use (``exacta_study.per_fold_family_specs()``) and their scored records hold ``meta``'s Win fit
+#   and the per-fold fit id of ``fold_lambdas``; nothing in the v2 families is read or written.
+#   It appends 42 B3 records to ``study.B3_PER_FOLD_ID`` (variant
+#   ``b3|lambda2=per_fold|<category>|<cell>``, params as the v2 B3 records with lambda2
+#   ``"per_fold"``, the ``mean_return`` metric like v2's) and one C record to
+#   ``study.C_PER_FOLD_ID``
+#   (variant ``c|lambda2=per_fold``, params ``{"estimator": "C", "lambda2": "per_fold"}``, the
+#   ``log_score_gain`` metric), each with components ``{"win": meta["win_fit"], "ordering":
+#   exacta_run.per_fold_fit_id(fold_lambdas)}``. Records already in the registry are reused, so a
+#   rerun appends nothing. It returns ``{"meta", "members" (the 42 B3 rows as ``score`` builds
+#   them, lambda2 "per_fold"), "log_score" (one row, lambda2 "per_fold"), "fold_lambda2" (a list of
+#   dicts, one per fold: test_start, test_end, train_end, n_train_races, lambda2, fit_id),
+#   "excluded" (the counts of ``score_races_per_fold``)}``. Holdout-day races are dropped before
+#   their exacta rows are read.
+# - ``exacta_run.per_fold_fit_id(fold_lambdas) -> str``: a deterministic id of the fold windows,
+#   lambda2 values and fit ids; any change to one of them changes it.
+# - ``exacta_run.load_fold_lambdas() -> list[FoldLambda2]``: the store-side wiring. Folds are
+#   ``walk_forward`` over the dates of every development race of the races table (from 2014-06-07,
+#   so the first scored quarter is 2020-Q1) under ``load_country_scheme("japan")``; a fold's
+#   training races are the out-of-fold (#114) races on development days dated on or before its
+#   ``train_end``, with ``finish_pos`` and ``dead_heat`` from the runners table (scratched runners
+#   dropped, as ``ordering._fit_frame`` does); no holdout-day race is ever in a fit.
+# - ``main(["freeze"])`` also freezes the v3 specs; ``main(["score-per-fold"])`` loads the races
+#   and folds, scores, writes ``per-fold-<sha12>-<build>.json`` and ``.md`` through
+#   ``write_report`` under reports/japan/131-exacta and regenerates the summary.
+
+PF_B3 = "japan-131-exacta-category-b3-v3"
+PF_C = "japan-131-exacta-logscore-v3"
+
+
+def _pf_folds() -> list:
+    make = exacta_run.FoldLambda2
+    return [
+        make(date(2025, 4, 1), date(2025, 4, 30), date(2025, 3, 25), 40, 0.55, "pfA000000001"),
+        make(date(2025, 5, 1), date(2025, 5, 20), date(2025, 4, 24), 90, 1.30, "pfB000000002"),
+        make(date(2026, 11, 1), date(2026, 11, 30), date(2026, 10, 24), 140, 0.90, "pfC000000003"),
+        make(date(2026, 12, 1), date(2026, 12, 31), date(2026, 11, 24), 0, None, None),
+    ]  # fmt: skip
+
+
+def _pf_lambda(day: date):
+    """The lambda2 of the fold holding ``day`` in ``_pf_folds``: None for a fold without one
+    (December 2026) and for a day in no fold (2025-05-24)."""
+    for fold in _pf_folds():
+        if fold.test_start <= day <= fold.test_end:
+            return fold.lambda2
+    return None
+
+
+def _pf_registry(path: Path) -> Registry:
+    return _frozen_registry(path, {**study.family_specs(), **study.per_fold_family_specs()})
+
+
+def _pf_score(reg, races, meta, folds=None, **kw):
+    return exacta_run.score_per_fold(
+        reg, copy.deepcopy(races), copy.deepcopy(meta), SHA,
+        _pf_folds() if folds is None else folds, n_boot=N_BOOT, **kw,
+    )  # fmt: skip
+
+
+def _ref_b3(race: dict, lambda2: float) -> dict[str, float]:
+    """B3 return per unit staked on each category's box: 1 / (p_w |S|), from Harville by loops."""
+    (winner, _, _), fav = race["exacta"][0], _ref_favourite(race["win_odds"])
+    h = _ref_exacta(race["p"], lambda2)
+    category, n = _ref_category(tuple(winner), fav), len(race["win_odds"])
+    size = (n - 1) * (n - 2) if category == "no_fav" else n - 1
+    out = dict.fromkeys(CATEGORIES, 0.0)
+    out[category] = 1 / (h[tuple(winner)] * size)
+    return out
+
+
+def test_freeze_also_freezes_the_per_fold_families_and_leaves_the_v2_hashes(isolated):
+    assert exacta_run.PER_FOLD_FAMILIES == (PF_B3, PF_C)
+    assert exacta_run.main(["freeze"]) == 0
+    reg = _cli_registry(isolated["data"])
+    for family_id, spec in {**study.family_specs(), **study.per_fold_family_specs()}.items():
+        assert reg.frozen_spec_hash(family_id) == exacta_run._spec_hash(spec), family_id
+    assert reg.records() == []  # a freeze is not a run
+
+
+def test_per_fold_fit_id_changes_with_any_window_lambda2_or_fit(loaded):
+    base = exacta_run.per_fold_fit_id(_pf_folds())
+    assert isinstance(base, str) and base and base == exacta_run.per_fold_fit_id(_pf_folds())
+    assert base != loaded[1]["ordering_fit"]
+    for k in range(4):
+        changes = ({"lambda2": 0.77}, {"fit_id": "other0000001"},
+                   {"test_end": date(2027, 1, 2)}, {"n_train_races": 1})  # fmt: skip
+        for change in changes:
+            folds = _pf_folds()
+            folds[k] = dataclasses.replace(folds[k], **change)
+            if folds[k] == _pf_folds()[k]:
+                continue
+            assert exacta_run.per_fold_fit_id(folds) != base, (k, change)
+
+
+def test_score_per_fold_records_b3_at_each_races_fold_lambda2(loaded, tmp_path):
+    races, meta = loaded
+    reg = _pf_registry(tmp_path)
+    result = _pf_score(reg, races, meta)
+    scored = [r for r in races if _pf_lambda(r["race_date"]) is not None]
+    assert len(scored) > 100 and len(scored) < len(races)  # a real subset: the others are out
+
+    records = reg.records(PF_B3)
+    wanted = {f"b3|lambda2=per_fold|{c}|{cell}" for c in CATEGORIES for cell in study.SEGMENT_CELLS}
+    assert len(records) == 42 and {r.variant for r in records} == wanted
+    ordering_id = exacta_run.per_fold_fit_id(_pf_folds())
+    cells = {r["race_id"]: _race_cells(r) for r in scored}
+    per_fold = {r["race_id"]: _ref_b3(r, _pf_lambda(r["race_date"])) for r in scored}
+    full = {r["race_id"]: _ref_b3(r, meta["lambda2_full_development"]) for r in scored}
+    moved = 0
+    for record in records:
+        assert record.status == "scored" and record.ticket == 131
+        assert set(record.params) == PARAM_KEYS and record.params["lambda2"] == "per_fold"
+        assert record.params["estimator"] == "B3"
+        assert record.components == {"win": meta["win_fit"], "ordering": ordering_id}
+        category, cell = record.params["category"], record.params["cell"]
+        ids = [i for i in per_fold if cell in cells[i]]
+        if not ids:
+            assert ("development", "mean_return") in _unavailable(record)
+            continue
+        got = _present(record)[("development", "mean_return")]
+        want = sum(per_fold[i][category] for i in ids) / len(ids)
+        assert got.n == len(ids) and got.value == pytest.approx(want, rel=1e-9), record.variant
+        at_full = sum(full[i][category] for i in ids) / len(ids)
+        moved += abs(want - at_full) > 1e-3 * abs(at_full)
+    assert moved >= 20  # out of sample is a different measurement from the full-development one
+
+    rows = [m for m in result["members"]]
+    assert len(rows) == 42 and {m["estimator"] for m in rows} == {"B3"}
+    assert {str(m["lambda2"]) for m in rows} == {"per_fold"}
+    assert {(m["category"], m["cell"]) for m in rows} == {
+        (c, cell) for c in CATEGORIES for cell in study.SEGMENT_CELLS
+    }
+
+
+def test_score_per_fold_records_c_at_each_races_fold_lambda2(loaded, tmp_path):
+    races, meta = loaded
+    reg = _pf_registry(tmp_path)
+    result = _pf_score(reg, races, meta)
+    scored = [r for r in races if _pf_lambda(r["race_date"]) is not None]
+    gains = [g for r in scored for g in _ref_log_score([r], _pf_lambda(r["race_date"]))]
+    full = [g for r in scored for g in _ref_log_score([r], meta["lambda2_full_development"])]
+    assert len(gains) == len(full) > 100
+    assert abs(sum(gains) - sum(full)) / len(gains) > 1e-4  # the two fits give other scores
+
+    (record,) = reg.records(PF_C)
+    assert record.variant == "c|lambda2=per_fold" and record.status == "scored"
+    assert record.params == {"estimator": "C", "lambda2": "per_fold"}
+    assert record.components == {"win": meta["win_fit"],
+                                 "ordering": exacta_run.per_fold_fit_id(_pf_folds())}  # fmt: skip
+    gain = _present(record)[("development", "log_score_gain")]
+    assert gain.n == len(gains) and gain.value == pytest.approx(sum(gains) / len(gains), rel=1e-9)
+    assert gain.lo is not None and gain.lo <= gain.value <= gain.hi
+    (row,) = result["log_score"]
+    assert str(row["lambda2"]) == "per_fold" and row["n"] == len(gains)
+    assert row["mean"] == pytest.approx(sum(gains) / len(gains), rel=1e-9)
+
+
+def test_score_per_fold_reports_the_fold_lambdas_and_what_it_left_out(loaded, tmp_path):
+    races, meta = loaded
+    result = _pf_score(_pf_registry(tmp_path), races, meta)
+    assert [str(f["test_start"]) for f in result["fold_lambda2"]] == [
+        "2025-04-01",
+        "2025-05-01",
+        "2026-11-01",
+        "2026-12-01",
+    ]
+    assert [f["lambda2"] for f in result["fold_lambda2"]] == [0.55, 1.30, 0.90, None]
+    assert [f["n_train_races"] for f in result["fold_lambda2"]] == [40, 90, 140, 0]
+    no_window = sum(1 for r in races if r["race_date"] == date(2025, 5, 24))
+    no_fit = sum(1 for r in races if r["race_date"] == date(2026, 12, 5))
+    assert no_window > 0 and no_fit > 0
+    assert result["excluded"]["no_test_window"] == no_window
+    assert result["excluded"]["no_training_races"] == no_fit
+
+
+def test_the_v2_full_development_rows_stay_beside_the_per_fold_rows(loaded, tmp_path):
+    races, meta = loaded
+    reg = _pf_registry(tmp_path)
+    _score(reg, races, meta)
+    assert _counts(reg) == EXPECTED_COUNTS
+    before = _canonical_records(reg)
+    _pf_score(reg, races, meta)
+    after = _canonical_records(reg)
+    assert set(before) <= set(after) and len(after) == len(before) + 42 + 1  # added, none replaced
+    for family_id in (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID):
+        assert (
+            len(reg.records(family_id))
+            == {study.E1_ID: 84, study.E1_B1_ID: 42, study.E1_B3_ID: 84, study.C_ID: 2}[family_id]
+        )
+    old_b3 = {r.params["lambda2"] for r in reg.records(study.E1_B3_ID)}
+    assert old_b3 == {"full_development", 1.0}
+    assert {r.family_id for r in reg.records()} >= {PF_B3, PF_C}
+    reg.verify()
+
+
+def test_a_rerun_of_score_per_fold_appends_nothing(loaded, tmp_path):
+    races, meta = loaded
+    reg = _pf_registry(tmp_path)
+    first = _pf_score(reg, races, meta)
+    records = _canonical_records(reg)
+    second = _pf_score(reg, races, meta)
+    assert _canonical_records(reg) == records and len(records) == 43
+    assert second["log_score"] == first["log_score"]
+
+
+def test_holdout_races_in_a_fold_window_are_never_read_or_scored(loaded, tmp_path):
+    races, meta = loaded
+    held = (
+        _holdout_scoring_races()
+    )  # 2026-11-29 (a fold window) and 2026-12-06 (a fold without fit)
+    assert len(held) == 12 and any(_pf_lambda(r["race_date"]) is not None for r in held)
+    dev = _pf_registry(tmp_path / "dev")
+    _pf_score(dev, races, meta)
+    mixed = _pf_registry(tmp_path / "mixed")
+    dev_races = copy.deepcopy(races)
+    _pf_score(mixed, [*dev_races[:100], *held[:6], *dev_races[100:], *held[6:]], meta)
+    assert _canonical_records(mixed) == _canonical_records(dev)
+
+
+def _refusal_cases():
+    return ["unfrozen", "altered_spec", "refit_fold", "other_win_fit"]
+
+
+@pytest.mark.parametrize("case", _refusal_cases())
+def test_score_per_fold_refuses_before_writing_an_unfrozen_changed_or_refitted_family(
+    loaded, tmp_path, case
+):
+    races, meta = loaded
+    folds, run_meta = _pf_folds(), copy.deepcopy(meta)
+    if case == "unfrozen":
+        reg = _frozen_registry(tmp_path)  # the v2 families only
+    elif case == "altered_spec":
+        reg = _frozen_registry(tmp_path, {**study.family_specs(), PF_C:
+                                          study.per_fold_family_specs()[PF_C]})  # fmt: skip
+        altered = copy.deepcopy(study.per_fold_family_specs()[PF_B3])
+        altered["n_boot"] = altered["n_boot"] + 1
+        reg.freeze_family(PF_B3, altered)
+    else:
+        reg = _pf_registry(tmp_path)
+        _pf_score(reg, races, meta)  # the first run under these folds and fits
+        folds[1] = dataclasses.replace(folds[1], lambda2=1.11, fit_id="pfB999999999")
+        if case == "other_win_fit":
+            folds, run_meta = _pf_folds(), {**meta, "win_fit": "winfitZ9999"}
+    before = _canonical_records(reg)
+    with pytest.raises(exacta_run.RunRefused) as raised:
+        _pf_score(reg, races, run_meta, folds)
+    if case in ("unfrozen", "altered_spec"):
+        assert PF_B3 in str(raised.value) or PF_C in str(raised.value)
+    assert _canonical_records(reg) == before  # nothing written
+
+
+# --- the store side: folds from the development calendar, fits from development races only ----
+
+
+def _pf_store_races() -> list[dict]:
+    """Synthetic JRA store: one 2014-06-07 race that opens the calendar (it has no out-of-fold
+    Win probability), six races on each of six 2020 days (2020-Q1 to Q3), six on 2026-11-28 and
+    six on one 2027 day (development), and eight on 2026-11-29 (a holdout day) whose second
+    finisher is always the longest shot, so any fit that sees them moves."""
+    rng = np.random.default_rng(284)
+    races: list[dict] = []
+
+    def day_races(day: date, count: int, shift: int) -> None:
+        for k in range(count):
+            j = k + shift
+            races.append(_make_race(
+                rng, f"jra:{day.isoformat()}:TOK:{k + 1:02d}", day, f"jra:{day.isoformat()}:TOK",
+                k + 1, *CLASSES[j % 3], FIELDS[j % 3], FAV_ODDS[j % 4], CATEGORIES[j % 3],
+            ))  # fmt: skip
+
+    day_races(date(2014, 6, 7), 1, 0)
+    days_2020 = [date(2020, 1, 11), date(2020, 2, 8), date(2020, 4, 11), date(2020, 5, 9),
+                 date(2020, 7, 11), date(2020, 8, 8)]  # fmt: skip
+    for shift, day in enumerate(days_2020):
+        day_races(day, 6, shift)
+    day_races(date(2026, 11, 28), 6, 1)
+    before = len(races)
+    day_races(HOLDOUT_DAYS[0], 8, 2)
+    for r in races[before:]:
+        r["winner"] = (max(r["p"], key=r["p"].get), min(r["p"], key=r["p"].get))
+    later = date(2027, 1, 9)
+    while _ref_holdout(later):
+        later += timedelta(days=7)
+    day_races(later, 6, 0)
+    return races
+
+
+def _pf_fit(races: list[dict], keep) -> tuple[float, int]:
+    """The ordering fit of the races ``keep`` accepts, from first principles of the store rows:
+    the winner first, the paying second, then the others in number order."""
+    from horsetrack.countries.japan.models.v0 import ordering
+
+    rows = []
+    for r in races:
+        if not keep(r):
+            continue
+        order = [*r["winner"], *sorted(h for h in r["odds"] if h not in r["winner"])]
+        rows += [{"race_id": r["race_id"], "horse_no": h, "p_win": r["p"][h],
+                  "finish_pos": float(pos), "dead_heat": False}
+                 for pos, h in enumerate(order, start=1)]  # fmt: skip
+    fit = ordering.fit_ordering(pd.DataFrame(rows), family="discounted_harville")
+    return fit.lambdas[0], fit.n_races
+
+
+def _pf_setup(data: Path) -> list[dict]:
+    races = _pf_store_races()
+    _write_store(data, races)
+    in_oof = [r for r in races if r["race_date"] != date(2014, 6, 7)]
+    _write_fits(data, in_oof, **FIT_A)
+    return races
+
+
+def _pf_expected(races: list[dict]) -> list[dict]:
+    """Per fold of the Japan scheme the store holds races in: its training window's end and the
+    lambda2 and count of the ordering fit of the development out-of-fold races dated up to it."""
+    in_oof = [r for r in races if not _ref_holdout(r["race_date"]) and r["race_date"].year > 2014]
+    out = []
+    for start, end, train_end in (
+        (date(2020, 1, 1), date(2020, 3, 31), date(2019, 12, 31)),
+        (date(2020, 4, 1), date(2020, 6, 30), date(2020, 3, 31)),
+        (date(2020, 7, 1), date(2020, 9, 30), date(2020, 6, 30)),
+        (date(2026, 10, 1), date(2026, 12, 31), date(2026, 9, 30)),
+        (date(2027, 1, 1), date(2027, 3, 31), date(2026, 12, 31)),
+    ):  # fmt: skip
+        train = [r for r in in_oof if r["race_date"] <= train_end]
+        lam, n = _pf_fit(train, lambda r: True) if train else (None, 0)
+        out.append({"test_start": start, "test_end": end, "train_end": train_end,
+                    "lambda2": lam, "n": n})  # fmt: skip
+    return out
+
+
+def test_the_folds_come_from_the_development_calendar_and_fit_on_development_races_only(isolated):
+    races = _pf_setup(isolated["data"])
+    held = [r for r in races if r["race_date"] == HOLDOUT_DAYS[0]]
+    assert len(held) == 8 and all(_ref_holdout(r["race_date"]) for r in held)
+    want = _pf_expected(races)
+
+    got = exacta_run.load_fold_lambdas()
+    # 2020-Q1 is the first scored quarter although the out-of-fold file starts there: the
+    # calendar reaches back to 2014-06-07; windows without a race are not folds.
+    assert [(f.test_start, f.test_end, f.train_end) for f in got] == [
+        (w["test_start"], w["test_end"], w["train_end"]) for w in want
+    ]
+    assert [f.n_train_races for f in got] == [w["n"] for w in want] == [0, 12, 24, 36, 42]
+    assert got[0].lambda2 is None and got[0].fit_id is None
+    for fold, w in zip(got[1:], want[1:], strict=True):
+        assert fold.lambda2 == pytest.approx(w["lambda2"], abs=1e-6), fold
+        assert isinstance(fold.fit_id, str) and fold.fit_id
+    assert len({round(f.lambda2, 6) for f in got[1:]}) == 4  # four different fits
+    # the holdout-day races (the longest shot always second) are in no fit: a fit that saw them
+    # is another number, so this equality is not a coincidence.
+    leaked, _ = _pf_fit(
+        races, lambda r: r["race_date"] <= date(2026, 12, 31) and r["race_date"].year > 2014
+    )
+    assert abs(leaked - got[-1].lambda2) > 1e-3
+
+
+def test_the_score_per_fold_command_scores_out_of_fold_and_leaves_the_v2_rows(
+    isolated, monkeypatch
+):
+    data = isolated["data"]
+    races = _pf_setup(data)
+    want = _pf_expected(races)
+    monkeypatch.setattr(
+        exacta_run, "score_per_fold", functools.partial(exacta_run.score_per_fold, n_boot=N_BOOT)
+    )
+    assert exacta_run.main(["freeze"]) == 0
+    assert exacta_run.main(["score-per-fold"]) == 0
+    reg = _cli_registry(data)
+    assert reg.records(study.E1_B3_ID) == [] and reg.records(study.C_ID) == []  # v2 untouched
+    assert len(reg.records(PF_B3)) == 42 and len(reg.records(PF_C)) == 1
+    assert [r for r in reg.records() if r.status == "failed"] == []
+
+    lam = {}
+    for w in want:
+        for r in races:
+            if (w["test_start"] <= r["race_date"] <= w["test_end"] and w["lambda2"] is not None
+                    and not _ref_holdout(r["race_date"])):  # fmt: skip
+                lam[r["race_id"]] = w["lambda2"]
+    assert len(lam) == 12 + 12 + 6 + 6  # 2020-Q1's twelve races have no fit; no holdout race
+    by_id = {r["race_id"]: r for r in races}
+    scored = []
+    for rid in lam:
+        r = by_id[rid]
+        odds = {int(h): float(o) for h, o in r["odds"].items()}
+        scored.append({"race_id": rid, "p": r["p"], "win_odds": odds,
+                       "exacta": [(tuple(r["winner"]), r["dividend"], False)],
+                       "race_class": r["race_class"], "race_no": r["race_no"]})  # fmt: skip
+    cells = {s["race_id"]: _race_cells(s) for s in scored}
+    for record in reg.records(PF_B3):
+        category, cell = record.params["category"], record.params["cell"]
+        ids = [s["race_id"] for s in scored if cell in cells[s["race_id"]]]
+        if not ids:
+            continue
+        want_mean = sum(_ref_b3(next(s for s in scored if s["race_id"] == i), lam[i])[category]
+                        for i in ids) / len(ids)  # fmt: skip
+        got = _present(record)[("development", "mean_return")]
+        assert got.n == len(ids) and got.value == pytest.approx(want_mean, rel=1e-6), record.variant
+    reports = _reports(data)
+    stem = f"per-fold-{SHA[:12]}"
+    assert (
+        len(list(reports.glob(f"{stem}*.json"))) == 1
+        and len(list(reports.glob(f"{stem}*.md"))) == 1
+    )
+    payload = json.loads(next(reports.glob(f"{stem}*.json")).read_text(encoding="utf-8"))
+    assert [f["lambda2"] for f in payload["fold_lambda2"]][0] is None
+    assert [f["n_train_races"] for f in payload["fold_lambda2"]] == [0, 12, 24, 36, 42]

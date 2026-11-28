@@ -24,9 +24,10 @@ variants of the days it ran on are told apart only by the variants' prior mean, 
 prior with a non-zero mean would shift the par of every cell linked to that day. The par is the
 cell's time on a day of average going.
 
-`fit(races)` estimates the pars, sigma and tau and nothing else: the races it is fitted on never
-feed `variant`. `observe(results)` gives it the results of races on the days to be predicted, each
-one's residual taken against the frozen fitted par; the pars, sigma and tau never change. The split
+`fit(races)` estimates the pars, sigma and tau (and keeps its own variants for
+`in_sample_variant`): the races it is fitted on never feed `variant`. `observe(results)` gives it
+the results of races on the days to be predicted, each one's residual taken against the frozen
+fitted par; the pars, sigma and tau never change. The split
 is what keeps the same-day variant as of t: a par is a mean over every race of its cell in the fit
 frame, whatever its `result_available_utc`, so had the variant read residuals from a par fitted on
 the day itself, a race resulted after t (the target race included) would move the variant at t
@@ -45,7 +46,28 @@ count and the answer is the prior, as it is when nothing is available. Under the
 the posterior mean is the mode found by the same reweighting, started from the prior mean, and the
 SD is that of the reweighted normal posterior.
 
-`expected_top3_time(race, at_utc)` is par(cell) + the variant's mean at t. #97 adds pace terms.
+`in_sample_variant(day, *group)` (#97, the owner's Q3 (b)) is for runs on the fit frame's own days,
+whose `variant` is the prior: the fit's own posterior (mean, SD) of that (day, group)'s v at
+convergence (its N(0, tau^2) prior, the fitted pars and, under the t, the races' weights), with the
+instant that (day, group) is fully resulted: the latest `result_available_utc` over every race of
+it in the frame given to `fit`, with a top-3 time or without (None when one has none: never fully
+resulted), so the caller uses it only at a t strictly after that. The mean and SD come from the
+races with a top-3 time alone; an untimed race only holds the instant back. None for a (day,
+group) with no timed race in the fit frame, and with `same_day_variant=False`. Nothing else reads
+it: `variant` and `expected_top3_time` are as before.
+
+`fit_cutoff` (#97) is the latest `result_available_utc` among the races with a top-3 time in the
+frame given to `fit`, every one of which the pars, sigma and tau read (an untimed race brings no
+time and does not move it); None when one of them has none (never published: no instant is after
+every result the fit read). A caller that may use nothing published at or after t uses the fit
+only at a t strictly after it. `version` counts the fits and the observations kept, so a reader
+that caches what it read from the model (#97's baselines) knows when to read it again;
+`fit_generation` counts the fits alone (no observation moves it), so a reader fitted on what the
+model was (#97's `HorseSpeed`) knows when it has been fitted again.
+
+`expected_top3_time(race, at_utc, pace_s=0.0)` is par(cell) + the variant's mean at t + pace_s,
+the race's pace term in seconds (#97): the caller computes it (#97's `speed_horse` passes its
+fitted race-level pace term), and a pace_s that is not a finite number is a ValueError.
 `par` of a cell the fit never saw raises KeyError; the variant of a (day, group) with nothing
 observed is the prior. No layer here is adopted (D16).
 """
@@ -175,9 +197,14 @@ class SpeedModel:
         self._prior = variant_prior
         self._par: dict[tuple, float] | None = None
         self._fit_days: frozenset[tuple] = frozenset()  # the (day, *group) keys of the fit frame
+        # fit (day, *group) -> (in-sample v mean, its SD, latest publication in ns or None)
+        self._in_sample: dict[tuple, tuple[float, float, int | None]] = {}
         # observed (day, *group) -> (result times, residuals from par), in result-time order
         self._days: dict[tuple, tuple[np.ndarray, np.ndarray]] = {}
         self._observed_ids: set = set()
+        self._cutoff: int | None = None  # fit_cutoff in ns (None: a timed race never published)
+        self.version = 0  # bumped by every fit and every observation kept
+        self.fit_generation = 0  # bumped by every fit alone
         self.sigma: float | None = None  # the error's scale (its SD when t_df is None), s
         self.tau: float | None = None  # the default variant prior's SD (the random effect's), s
         self.n_races = 0
@@ -220,14 +247,43 @@ class SpeedModel:
         cell, cells = _codes(cell_keys)
         group, groups = _codes(group_keys)
 
-        par, sigma2, tau2, n_iter = self._solve(y, cell, group, len(cells), len(groups))
+        par, sigma2, tau2, n_iter, v, v_sd = self._solve(y, cell, group, len(cells), len(groups))
+        last, never = self._resulted_at(races, groups)
         self._par = {c: float(p) for c, p in zip(cells, par, strict=True)}
         self.sigma, self.tau = math.sqrt(sigma2), math.sqrt(tau2)
         self.n_races, self.n_iter = len(y), n_iter
         self._fit_days = frozenset(groups)
+        self._in_sample = {
+            g: (float(v[k]), float(v_sd[k]), None if never[k] else int(last[k]))
+            for k, g in enumerate(groups)
+        }
         self._days, self._observed_ids = {}, set()
         self.n_observed = self.n_unseen = 0
+        avail, known = _utc_ns(frame["result_available_utc"], "result_available_utc")
+        self._cutoff = int(avail.max()) if known.all() else None
+        self.version += 1
+        self.fit_generation += 1
         return self
+
+    def _resulted_at(
+        self, races: pd.DataFrame, groups: list[tuple]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Per fit (day, *group): the latest result_available_utc (ns) over every race of it in
+        races, with a top-3 time or without, and whether one of them has none (never resulted).
+        A race without a race_utc or a variant key has no (day, group) and is left out."""
+        keys = self.spec.variant_keys
+        placed = races[races[["race_utc", *keys]].notna().all(axis=1)]
+        _utc_ns(placed["race_utc"], "race_utc")
+        avail, known = _utc_ns(placed["result_available_utc"], "result_available_utc")
+        days = pd.to_datetime(placed["race_utc"]).dt.tz_convert(JST).dt.date.tolist()
+        index = {g: k for k, g in enumerate(groups)}
+        rows = zip(days, *(placed[k].tolist() for k in keys), strict=True)
+        code = np.fromiter((index.get(g, -1) for g in rows), np.int64, len(placed))
+        hit = code >= 0
+        last = np.full(len(groups), np.iinfo(np.int64).min)
+        np.maximum.at(last, code[hit], avail[hit])
+        never = np.bincount(code[hit], ~known[hit], len(groups)) > 0
+        return last, never
 
     def observe(self, results: pd.DataFrame) -> SpeedModel:
         """Keep the residuals from the fitted par of races on days to be predicted (see the module
@@ -267,10 +323,12 @@ class SpeedModel:
         self._observed_ids.update(ids)
         self.n_observed += sum(seen)
         self.n_unseen += len(seen) - sum(seen)
+        self.version += 1
         return self
 
     def _solve(self, y, cell, group, n_cells, n_groups):
-        """Pars, sigma^2 and tau^2 by conditional maximisation (see the module docstring)."""
+        """Pars, sigma^2, tau^2 and the variants' posterior means and SDs by conditional
+        maximisation (see the module docstring)."""
         df = self.spec.t_df
         par = pd.Series(y).groupby(cell).median().to_numpy()
         v = np.zeros(n_groups)
@@ -295,7 +353,7 @@ class SpeedModel:
             par, v, sigma2, tau2 = par_new, v_new, sigma2_new, tau2_new
             r = y - par[cell]
             if change <= TOL:
-                return par, sigma2, tau2, n_iter
+                return par, sigma2, tau2, n_iter, v, 1.0 / np.sqrt(prec)
         raise RuntimeError(f"the speed model did not converge in {MAX_ITER} iterations")
 
     # -- reads ----------------------------------------------------------------------------------
@@ -304,6 +362,13 @@ class SpeedModel:
         if self._par is None:
             raise RuntimeError("the speed model is not fitted")
         return self._par
+
+    @property
+    def fit_cutoff(self) -> pd.Timestamp | None:
+        """The latest publication among the fit frame's timed races, None if one was never
+        published (see the module docstring)."""
+        self._fitted()
+        return None if self._cutoff is None else pd.Timestamp(self._cutoff, tz="UTC")
 
     def _prior_for(self, race_date: date, group: tuple) -> tuple[float, float]:
         if self._prior is None:
@@ -326,12 +391,15 @@ class SpeedModel:
         except KeyError:
             raise KeyError(f"no par for the unseen cell {cell}") from None
 
-    def variant(self, race_date: date, *group: Any, at_utc: datetime) -> tuple[float, float]:
+    def _check_day(self, race_date: date, group: tuple) -> None:
         self._fitted()
         if isinstance(race_date, datetime) or not isinstance(race_date, date):
             raise TypeError(f"race_date must be a datetime.date, got {type(race_date).__name__}")
         if len(group) != len(self.spec.variant_keys):
             raise TypeError(f"variant takes the race date and {self.spec.variant_keys}")
+
+    def variant(self, race_date: date, *group: Any, at_utc: datetime) -> tuple[float, float]:
+        self._check_day(race_date, group)
         at_ns = _instant_ns(at_utc, "at_utc")
         m0, s0 = self._prior_for(race_date, group)
         day = self._days.get((race_date, *group)) if self.spec.same_day_variant else None
@@ -339,6 +407,18 @@ class SpeedModel:
             return m0, s0
         avail, resid = day
         return self._posterior(resid[: np.searchsorted(avail, at_ns, side="left")], m0, s0)
+
+    def in_sample_variant(
+        self, race_date: date, *group: Any
+    ) -> tuple[float, float, pd.Timestamp | None] | None:
+        """(mean, SD, fully resulted at) of the fit's own v on a fit (day, group), else None (see
+        the module docstring)."""
+        self._check_day(race_date, group)
+        got = self._in_sample.get((race_date, *group)) if self.spec.same_day_variant else None
+        if got is None:
+            return None
+        mean, sd, last = got
+        return mean, sd, None if last is None else pd.Timestamp(last, tz="UTC")
 
     def _posterior(self, r: np.ndarray, m0: float, s0: float) -> tuple[float, float]:
         if r.size == 0:
@@ -356,8 +436,10 @@ class SpeedModel:
                 break
         return float(mean), float(1.0 / math.sqrt(prec))
 
-    def expected_top3_time(self, race: Mapping, *, at_utc: datetime) -> float:
+    def expected_top3_time(self, race: Mapping, *, at_utc: datetime, pace_s: float = 0.0) -> float:
+        if isinstance(pace_s, bool) or not isinstance(pace_s, Real) or not math.isfinite(pace_s):
+            raise ValueError(f"pace_s must be a finite number of seconds: {pace_s!r}")
         par = self.par(**{k: race[k] for k in self.spec.par_keys})
         group = tuple(race[k] for k in self.spec.variant_keys)
         mean, _ = self.variant(_jst_date(race["race_utc"]), *group, at_utc=at_utc)
-        return par + mean
+        return par + mean + pace_s

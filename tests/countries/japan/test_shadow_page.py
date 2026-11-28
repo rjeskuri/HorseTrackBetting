@@ -59,6 +59,13 @@ sets `module.exports` (when `module` exists) to at least:
   A poll that redraws the same race keeps each pool's horizontal scroll: the `[data-pool]` element
   (shadow.html's `.pool`, `overflow-x: auto`) has the same `scrollLeft` after the redraw as before.
 
+Ticket #506 (pinned in test_shadow_page_pools.py) adds, per race, a section (`data-pool`) for every
+bet type whatever the plain feed holds (WIN, PLACE, QUINELLA, QUINELLA_PLACE, FORECAST, TRIO,
+TIERCE, BRACKET_QUINELLA), a `data-col="p-model"` cell on every row, and FORECAST, TRIO and
+TIERCE rows taken from the shadow race's `p_model` (its 15 most probable combinations) rather
+than from the plain feed. The tests here keep the tier-1 contract: the rows of the plain feed's
+pools, in the board's order, with their cells; a section without rows draws none.
+
 In the browser there is no module system: shadow.js must find board.js's functions some other way
 (board.js may expose them, e.g. on `window`, as long as test_board_page.py stays green). One test
 loads board.js then shadow.js as plain scripts (no `module`, no `require`), fires the 5 s timers
@@ -112,6 +119,16 @@ UTC = timezone.utc
 JST = timezone(timedelta(hours=9))
 DAY = "2026-11-28"
 FLAGS = ("floor", "tail", "tail_member", "stale", "scratched")
+ALL_POOLS = (  # one section per bet type on every race (#506)
+    "WIN",
+    "PLACE",
+    "QUINELLA",
+    "QUINELLA_PLACE",
+    "FORECAST",
+    "TRIO",
+    "TIERCE",
+    "BRACKET_QUINELLA",
+)
 
 
 def jst(hh: int, mm: int, ss: int = 0) -> datetime:
@@ -831,7 +848,8 @@ def test_renders_values_for_every_race_and_pool(tmp_path):
         races = [r for v in FEED["venues"] if v["venue"] == venue for r in v["races"]]
         for race_ in [r for r in races if r["race_id"] == race_id]:
             block = race_block(page, race_["race_id"])
-            assert {e["data-pool"] for e in block.select("[data-pool]")} == set(race_["pools"])
+            shown_pools = {e["data-pool"] for e in block.select("[data-pool]")}
+            assert shown_pools == set(ALL_POOLS) >= set(race_["pools"]), shown_pools  # #506
             tau = (taus.get(race_["race_id"]) or {}).get("tau_bucket_min")
             for pool_code, body in race_["pools"].items():
                 for row_ in body["rows"]:
@@ -1230,6 +1248,8 @@ def test_the_ladder_shows_observed_and_projected_odds(tmp_path):
 
     # the header names the five columns, each above its cells
     for pool_el in block.select("[data-pool]"):
+        if pool_el["data-pool"] not in plain["venues"][0]["races"][0]["pools"]:
+            continue  # a section the plain feed has no rows for (#506: every bet type is drawn)
         heads = [text(th) for th in pool_el.select("thead th")]
         row_el = pool_el.select("[data-combination]")[0]
         positions = row_el.find_all(["th", "td"], recursive=False)
@@ -2013,8 +2033,9 @@ def test_a_poll_keeps_each_pools_horizontal_scroll(tmp_path):
     plain = {"plain": {"feed": FEED, "etag": '"p1"'}}
     one = {**plain, "shadow": {"feed": SHADOW, "etag": '"s1"'}}
     two = {**plain, "shadow": {"feed": newer, "etag": '"s2"'}}
-    first = {"WIN": 140, "PLACE": 0, "QUINELLA_PLACE": 75}
-    second = {"WIN": 20, "PLACE": 210, "QUINELLA_PLACE": 75}
+    unscrolled = dict.fromkeys(ALL_POOLS, 0)  # every bet type has a section (#506)
+    first = {**unscrolled, "WIN": 140, "PLACE": 0, "QUINELLA_PLACE": 75, "TIERCE": 60}
+    second = {**unscrolled, "WIN": 20, "PLACE": 210, "QUINELLA_PLACE": 75, "TIERCE": 0}
     steps = [
         {"scroll": first},
         {"fire": 5000},  # 304s: the same race drawn again
@@ -2027,7 +2048,7 @@ def test_a_poll_keeps_each_pools_horizontal_scroll(tmp_path):
     k3 = rid("KYO", 3)
     for r in out["results"]:
         assert [b["data-race"] for b in race_blocks(soup(r["shadow"]))] == [k3]
-    assert loaded["pools"] == {"WIN": 0, "PLACE": 0, "QUINELLA_PLACE": 0}, loaded["pools"]
+    assert loaded["pools"] == unscrolled, loaded["pools"]
     assert scrolled["pools"] == first and rescrolled["pools"] == second  # the fake holds them
     assert poll_304["pools"] == first, poll_304["pools"]
     assert poll_new["pools"] == second, poll_new["pools"]

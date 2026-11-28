@@ -1,9 +1,15 @@
 """The #131 exacta study's run: freeze the families, count the inputs, score E1 on development days.
 
-`python -m horsetrack.countries.japan.research.exacta_run {freeze|count|score|max-test|breakage}`
+`python -m horsetrack.countries.japan.research.exacta_run
+{freeze|count|score|max-test|breakage|score-per-fold}`
 
-- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` in the Japan registry.
-  It records the specs only: the committed summary lists runs, and a freeze is not one.
+- freeze: ``freeze_family`` for every spec of ``exacta_study.family_specs`` (and the #284
+  ``per_fold_family_specs``) in the Japan registry. It records the specs only: the committed
+  summary lists runs, and a freeze is not one.
+- score-per-fold (#284): lambda2 refitted per walk-forward fold of folds.yaml on the fold's
+  training races alone, and B3 and C re-scored out of sample under the v3 families, beside the
+  v2 ``full_development`` rows (kept, partly in-sample). The first scored quarter has no
+  training race and is left out (counted as ``no_training_races``).
 - count: row counts only (no outcome is scored): development races with a FORECAST dividend,
   out-of-fold Win probabilities, the ordering fit, and #130-logged meetings with exacta boards.
 - score: E1 (B2) with its variants B1, B3 and the log-score total C; every variant is a registry
@@ -49,7 +55,7 @@ import json
 import math
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
@@ -61,6 +67,7 @@ import pyarrow.parquet as pq
 from horsetrack.core import env, paths
 from horsetrack.core.eval import snooping
 from horsetrack.core.eval.bootstrap import paired_bootstrap
+from horsetrack.core.eval.folds import FoldScheme, load_country_scheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
 from horsetrack.core.eval.registry import (
     FoldMetric,
@@ -71,6 +78,7 @@ from horsetrack.core.eval.registry import (
 )
 from horsetrack.core.eval.reports import write_report
 from horsetrack.countries.japan import odds_log, takeout
+from horsetrack.countries.japan.models.v0 import ordering
 from horsetrack.countries.japan.research import exacta_study as study
 from horsetrack.countries.japan.research.exacta_consistency import (
     CATEGORIES,
@@ -84,6 +92,7 @@ SOURCES = ("jra",)
 MAX_TEST_ID = f"{study.E1_ID}-max-test"
 E2_REGISTRY_ID = study.E2_ID  # E2's registry id (#525, already "/"-free), for exacta_rules
 SCORED_FAMILIES = (study.E1_ID, study.E1_B1_ID, study.E1_B3_ID, study.C_ID)
+PER_FOLD_FAMILIES = (study.B3_PER_FOLD_ID, study.C_PER_FOLD_ID)  # #284, scored by score-per-fold
 BREAKAGE_ID = "japan-131-exacta-breakage"
 BREAKAGE_STEP = 10.0  # JRA pays per 100 yen rounded down to 10 yen
 STEPM_FWER = 0.05  # the spec's 95% level as a family-wise error rate
@@ -194,9 +203,9 @@ def _appender(registry) -> Callable[[RunRecord], None]:
     return append
 
 
-def _check_frozen(registry, families: Iterable[str]) -> None:
+def _check_frozen(registry, families: Iterable[str], specs: dict | None = None) -> None:
     """Refuse unless each family is frozen with the hash of the spec in use."""
-    specs = study.family_specs()
+    specs = study.family_specs() if specs is None else specs
     for family_id in families:
         frozen = registry.frozen_spec_hash(family_id)
         if frozen is None:
@@ -738,11 +747,203 @@ def _breakage_markdown(rows: list[dict], sha: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --------------------------------------------------------------------------- #284: per-fold lambda2
+
+ORDERING_FAMILY = "discounted_harville"
+
+
+@dataclass(frozen=True)
+class FoldLambda2:
+    """One walk-forward fold's lambda2, fitted on the fold's training races alone. ``lambda2`` and
+    ``fit_id`` are None when no race of the fit frame precedes the fold (``n_train_races`` 0)."""
+
+    test_start: date
+    test_end: date
+    train_end: date
+    n_train_races: int
+    lambda2: float | None
+    fit_id: str | None
+
+
+def per_fold_lambda2(
+    fit_frame: pd.DataFrame, scheme: FoldScheme, *, calendar: Iterable[date] | None = None
+) -> list[FoldLambda2]:
+    """Fit lambda2 (``ordering.fit_ordering``'s stage-1 maximum likelihood) once per
+    ``walk_forward`` fold, on the fit frame's races dated on or before the fold's ``train_end``
+    only: nothing of the test window, the embargo or a later fold reaches the fit.
+
+    ``fit_frame`` has ``ordering.COLUMNS`` plus ``race_date`` (one date per race). ``calendar``
+    (every race date of the development calendar) defines the folds; it defaults to the frame's
+    own race dates."""
+    races = fit_frame.drop_duplicates("race_id")[["race_id", "race_date"]]
+    stamps = pd.to_datetime(races["race_date"])
+    days = races["race_date"] if calendar is None else pd.Series(list(calendar))
+    out = []
+    for fold in walk_forward(days, scheme=scheme):
+        ids = races.loc[stamps <= pd.Timestamp(fold.train_end), "race_id"]
+        if ids.empty:
+            out.append(FoldLambda2(fold.test_start, fold.test_end, fold.train_end, 0, None, None))
+            continue
+        frame = fit_frame.loc[fit_frame["race_id"].isin(set(ids)), ordering.COLUMNS]
+        fit = ordering.fit_ordering(frame.reset_index(drop=True), family=ORDERING_FAMILY)
+        out.append(
+            FoldLambda2(fold.test_start, fold.test_end, fold.train_end, fit.n_races,
+                        fit.lambdas[0], fit.fit_id)
+        )  # fmt: skip
+    return out
+
+
+def per_fold_fit_id(folds: Sequence[FoldLambda2]) -> str:
+    """A deterministic id of the fold windows, lambda2 values and fit ids (recorded as the
+    ordering component of every per-fold record)."""
+    text = json.dumps([asdict(f) for f in folds], sort_keys=True, default=str,
+                      separators=(",", ":"))  # fmt: skip
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def load_fold_lambdas() -> list[FoldLambda2]:
+    """The folds of folds.yaml over the development calendar (every development race date from
+    2014-06-07) and each one's lambda2, fitted on the development out-of-fold (#114) races dated
+    up to its ``train_end``. Holdout days are not in the calendar and no holdout race is read."""
+    races = development_races()
+    _, oof_path, _, _ = _fits()
+    oof = _read(oof_path, ordering.OOF_COLUMNS, races["race_id"].tolist())
+    fit_frame = ordering._fit_frame(oof, paths.processed_dir("jra") / "runners.parquet")
+    dates = races[["race_id", "race_date"]]
+    fit_frame = fit_frame.merge(dates, on="race_id", how="inner", validate="many_to_one")
+    return per_fold_lambda2(
+        fit_frame, load_country_scheme(COUNTRY), calendar=dates["race_date"].unique()
+    )
+
+
+def _check_per_fold_fits(registry, meta: dict, fit_id: str) -> None:
+    """Refuse a Win fit or a per-fold fit other than the one the per-fold families' scored records
+    hold, so a family never mixes fits."""
+    want = {"win": meta["win_fit"], "ordering": fit_id}
+    for family in PER_FOLD_FAMILIES:
+        for r in registry.records(family):
+            if r.status != "scored":
+                continue
+            for key, fit in want.items():
+                if r.components.get(key) != fit:
+                    raise RunRefused(
+                        f"{family} holds scored records under {key} fit "
+                        f"{r.components.get(key)}, not {fit}: a refit needs its own frozen family"
+                    )
+
+
+def score_per_fold(
+    registry,
+    races: list[dict],
+    meta: dict,
+    sha: str,
+    fold_lambdas: Sequence[FoldLambda2],
+    *,
+    n_boot: int = 10000,
+) -> dict:
+    """Re-score B3 and C with each race at its walk-forward fold's own lambda2 (#284): one record
+    per B3 member under ``B3_PER_FOLD_ID`` and one C record under ``C_PER_FOLD_ID``. The v2
+    families (``full_development``, partly in-sample) are neither read nor written.
+    ``RunRefused`` before anything is written unless both families are frozen with the spec in use
+    and their scored records hold ``meta``'s Win fit and ``per_fold_fit_id(fold_lambdas)``. Records
+    already in ``registry`` are reused. Holdout-day races are dropped before their exacta rows
+    are read; races in no fold window, or in a fold without training races, are counted."""
+    fit_id = per_fold_fit_id(fold_lambdas)
+    _check_frozen(registry, PER_FOLD_FAMILIES, study.per_fold_family_specs())
+    _check_per_fold_fits(registry, meta, fit_id)
+    append = _appender(registry)
+    races = [r for r in races if not is_holdout_day(COUNTRY, r["race_date"])]
+    frame = study.score_races_per_fold(races, holdout_day=is_holdout_day, fold_lambdas=fold_lambdas)
+    meta["excluded"] = frame.attrs["excluded"]
+    meta["scored_races"] = int(frame["race_id"].nunique())
+    meta["scored_meetings"] = int(frame["meeting_id"].nunique())
+    seed, key = 131, study.PER_FOLD
+    components = {"win": meta["win_fit"], "ordering": fit_id}
+
+    rows = []
+    for category in CATEGORIES:
+        for cell in study.SEGMENT_CELLS:
+            sub = frame[(frame["category"] == category) & frame[cell]]
+            m = _member_metrics(sub, "b3", False, seed, n_boot)
+            rows.append({"estimator": "B3", "family": study.B3_PER_FOLD_ID, "lambda2": key,
+                         "category": category, "cell": cell, **m,
+                         **_return_per_100(sub, "b3", "B3", seed, n_boot)})  # fmt: skip
+            entries = [
+                ("mean_return", m["rho"], float(m["lo"]), float(m["hi"]), EMPTY_CELL),
+                ("bootstrap_se", m["se"], None, None, EMPTY_CELL),
+            ]
+            params = {"estimator": "B3", "lambda2": key, "category": category, "cell": cell,
+                      "direction": study.DIRECTIONS[category]}  # fmt: skip
+            append(_record(
+                study.B3_PER_FOLD_ID, f"b3|lambda2={key}|{category}|{cell}", params, components,
+                _metrics("development", entries, int(m["n"])), meta, sha,
+            ))  # fmt: skip
+
+    # C: each scored race's log q_w - log p_w at its own fold's lambda2, one paired comparison.
+    gains = []
+    for fold in fold_lambdas:
+        if fold.lambda2 is None:
+            continue
+        window = [r for r in races if fold.test_start <= r["race_date"] <= fold.test_end]
+        if window:
+            gains.append(_log_score(window, fold.lambda2))
+    gain = pd.concat(gains) if gains else _log_score([], 1.0)
+    if gain.empty:  # every scored dividend at or below the 110-yen floor
+        mean, lo, hi, meetings = math.nan, math.nan, math.nan, 0
+    else:
+        ci = paired_bootstrap(gain["gain"], gain["meeting_id"], n_boot=n_boot, level=0.95,
+                              seed=seed)  # fmt: skip
+        mean, meetings = ci.mean, ci.n_clusters
+        lo, hi = (ci.lo, ci.hi) if meetings >= 2 else (math.nan, math.nan)
+    c_row = {"lambda2": key, "mean": mean, "lo": lo, "hi": hi, "n": len(gain),
+             "meetings": meetings}  # fmt: skip
+    why = "no scored race pays above the 110-yen floor: q_w is unknown at the floor"
+    append(_record(
+        study.C_PER_FOLD_ID, f"c|lambda2={key}", {"estimator": "C", "lambda2": key}, components,
+        _metrics("development", [("log_score_gain", mean, lo, hi, why)], len(gain)), meta, sha,
+    ))  # fmt: skip
+    return {
+        "meta": meta,
+        "members": rows,
+        "log_score": [c_row],
+        "fold_lambda2": [asdict(f) for f in fold_lambdas],
+        "excluded": frame.attrs["excluded"],
+    }
+
+
+def write_per_fold_outputs(summary: dict, sha: str, out: Path) -> None:
+    """The per-fold member table, C row and fold lambda2 table, through write_report."""
+    stem = _stem("per-fold", sha, summary["meta"])
+    text = json.dumps(_json_safe(summary), indent=1, default=str, allow_nan=False)
+    write_report(out / f"{stem}.json", text, sources=SOURCES)
+    lines = [f"# #131 exacta study: B3 and C at the per-fold lambda2 ({sha[:12]})", "",
+             "| test start | test end | train end | training races | lambda2 | fit id |",
+             "| --- | --- | --- | --- | --- | --- |"]  # fmt: skip
+    for f in summary["fold_lambda2"]:
+        lines.append(f"| {f['test_start']} | {f['test_end']} | {f['train_end']} | "
+                     f"{f['n_train_races']} | {_fmt(f['lambda2'], 4)} | "
+                     f"{f['fit_id'] or 'n/a'} |")  # fmt: skip
+    c = summary["log_score"][0]
+    lines += ["", f"Races left out: {json.dumps(summary['excluded'], sort_keys=True)}", "",
+              "| estimator | category | cell | n | estimate | 95% lo | 95% hi |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]  # fmt: skip
+    for r in summary["members"]:
+        lines.append(f"| {r['estimator']} | {r['category']} | {r['cell']} | {r['n']} | "
+                     f"{_fmt(r['rho'], 3)} | {_fmt(r['lo'], 3)} | "
+                     f"{_fmt(r['hi'], 3)} |")  # fmt: skip
+    lines += [
+        "",
+        f"C (log-score gain, mean of log q_w - log p_w): n {c['n']}, "
+        f"{_fmt(c['mean'], 4)}, 95% [{_fmt(c['lo'], 4)}, {_fmt(c['hi'], 4)}]",
+    ]
+    write_report(out / f"{stem}.md", "\n".join(lines) + "\n", sources=SOURCES)
+
+
 def freeze() -> dict[str, str]:
     """Freeze every family spec, and each superseded spec under its #525 id so every live
     ``supersedes`` names a freeze; the committed summary (runs only) is left alone."""
     registry = default_registry(COUNTRY)
-    specs = {**study.superseded_specs(), **study.family_specs()}
+    specs = {**study.superseded_specs(), **study.family_specs(), **study.per_fold_family_specs()}
     return {fid: registry.freeze_family(fid, spec) for fid, spec in specs.items()}
 
 
@@ -765,7 +966,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m horsetrack.countries.japan.research.exacta_run"
     )
-    parser.add_argument("action", choices=["freeze", "count", "score", "max-test", "breakage"])
+    parser.add_argument(
+        "action", choices=["freeze", "count", "score", "max-test", "breakage", "score-per-fold"]
+    )
     parser.add_argument("--note", help="max-test: why the max test is re-run (recorded)")
     args = parser.parse_args(argv)
     out = paths.reports_dir() / "japan" / "131-exacta"
@@ -793,6 +996,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                      sources=SOURCES)  # fmt: skip
         write_report(out / f"{stem}.md", _breakage_markdown(rows, sha), sources=SOURCES)
         result = [r for r in rows if r["cell"] == "all"]
+    elif args.action == "score-per-fold":  # #284: B3 and C out of sample, beside the v2 rows
+        sha, registry = _git_sha(), default_registry(COUNTRY)
+        races, meta = load_races()
+        folds = load_fold_lambdas()
+        result = _recorded(registry, study.B3_PER_FOLD_ID, meta, sha,
+                           lambda: score_per_fold(registry, races, meta, sha, folds))  # fmt: skip
+        write_per_fold_outputs(result, sha, out)
+        write_summary(registry, summary_dir(COUNTRY))
+        result = {k: result[k] for k in ("fold_lambda2", "excluded", "log_score")}
     else:
         sha, registry = _git_sha(), default_registry(COUNTRY)
         races, meta = load_races()
