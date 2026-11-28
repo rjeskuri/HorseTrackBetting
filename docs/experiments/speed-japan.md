@@ -544,15 +544,15 @@ The 24 variants are rows `japan-speed-top3-c3-prior/<error model>:<prior>:<predi
 `japan-speed-top3-c3-prior/t5:previous_day:variant_on_vs_variant_on`. Like #305's and #416's they measure a time
 forecast, not a return per ¥100, so they are listed with no return and are not ranked. `leaderboard_backfill` gives an
 unlisted family the kind `other`; #305's family is a `member` through `LEGACY_KINDS`, and listing this one there too
-waits on the backfill tests' kinds table (a follow-up below).
+waits on the backfill tests' kinds table (#639, a follow-up below).
 
 ### Follow-ups
 
-Proposed under epic #73, not blocking #328:
-- A surface coupling that may be negative or depends on the going (for instance estimated on each fold's training
-  days, or split by the moisture prior of #90 and #230), in a new family.
-- The previous-day prior with its decay estimated on the training folds, or a prior SD inflated as the day's own
+Filed as `status:proposed` tickets naming epic #73, not blocking #328:
+- #637: a surface coupling that may be negative or depends on the going (for instance estimated on each fold's
+  training days, or split by the moisture prior of #90 and #230), in a new family.
+- #638: the previous-day prior with its decay estimated on the training folds, or a prior SD inflated as the day's own
   results come in, so that it gives way from three results on, in a new family.
-- List `japan-speed-top3-c3-prior` as a `member` in `leaderboard_backfill.LEGACY_KINDS`, with the backfill tests' kinds
-  table.
-- E39's marginal test (#97) can carry the previous-day prior as a variant of the speed member.
+- #639: list `japan-speed-top3-c3-prior` as a `member` in `leaderboard_backfill.LEGACY_KINDS`, with the backfill tests'
+  kinds table.
+- #640: E39's marginal test (#97) can carry the previous-day prior as a variant of the speed member.
