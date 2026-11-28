@@ -230,3 +230,9 @@ family registers the `depth` variant for them alone and changes nothing in v1 or
   `pool-depth-exotics-japan-<first 16 hex of its run id>.md` under `$HORSETRACK_DATA_DIR/reports/`;
   the public report (`docs/experiments/pool-depth-japan.md`) lists the run and withholds every
   figure (D21).
+
+After the run (2026-11-28; not part of the frozen spec): frozen at `5af150b` before any run; the
+first run, at `5af150b`, **scored** (registry run
+`7363def84fd94c5482d56a1a404bb43ea6956ffdbba2461b5eff931ed22537ec`, private report
+`pool-depth-exotics-japan-7363def84fd94c54.md`), with a peak resident set of about 1.65 GB
+(`/usr/bin/time -l`), under the 2.5 GB bound. Every figure: withheld (D21).
