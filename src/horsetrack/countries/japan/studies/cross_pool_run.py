@@ -47,6 +47,12 @@ then writes this study's pages of the committed registry summary (`write_committ
 after `--run`, `docs/experiments/cross-pool-japan.md`, whose figures are all withheld (D21).
 Measurement only: nothing is adopted.
 
+v2 (#562, `FAMILY_ID_V2`, `--family v2`): the same study under its own freeze, its report and
+cells named `cross-pool-japan-<spec hash[:12]>-data-<data fingerprint>` (`data_fingerprint`, from
+the store's listing and stat), never overwritten (`FileExistsError` before any store file is
+opened, nothing appended), and its public page `docs/experiments/cross-pool-japan-v2.md`. v1's
+spec, names and page are unchanged.
+
 Memory: one day file at a time (WIN and QUINELLA rows at or before t only, the columns the board
 needs); `final_odds` one pool and year at a time, its year row group picked by the race_date
 statistics and decoded in batches filtered by pool and development race id (a whole-row-group scan
@@ -119,6 +125,15 @@ COUNTRY = "japan"
 TICKET = 435
 SOURCE = "jravan"
 FAMILY_ID = "japan-cross-pool-t2-v1"
+# v2 (#562): v1's study, its private report and cells named by the run's data fingerprint, never
+# overwritten; v1's spec, records and files stay as frozen and run.
+FAMILY_ID_V2 = "japan-cross-pool-t2-v2"
+TICKET_V2 = 562
+FAMILIES = (FAMILY_ID, FAMILY_ID_V2)
+CELLS_DIR = "candidate-cells"  # under the out dir; research.leaderboard_build reads it
+DATA_MARK = "-data-"  # v2's names: <stem>-data-<fingerprint>, the leaderboard's newest-of rule
+CLI_FAMILIES = {"v1": FAMILY_ID, "v2": FAMILY_ID_V2}  # --family
+PUBLIC_PAGES = {FAMILY_ID: "cross-pool-japan.md", FAMILY_ID_V2: "cross-pool-japan-v2.md"}
 TRIAL_FAMILY_ID = "japan-cross-pool-t2-trial"  # trial runs' records; never FAMILY_ID's
 HYPOTHESIS = "E25"
 STUDY = "cross-pool/final-price-diagnostic"  # settlement, N5 and cells use the closing prices
@@ -1164,12 +1179,48 @@ def _spec(*, date_from: date, date_to: date, seed: int, family_id: str, scheme: 
     }
 
 
-def build_spec(*, date_from: date, date_to: date, seed: int) -> dict:
-    """The family's pre-registered spec (docs/specs/cross-pool-prereg.md), plain JSON."""
+def _v2(spec: dict) -> dict:
+    """v1's spec as v2's (#562): the same study under v2's id, its artifacts named by the data
+    fingerprint and never overwritten (docs/specs/cross-pool-prereg.md, "v2")."""
+    name = f"cross-pool-japan-<spec hash[:12]>{DATA_MARK}<data fingerprint>"
+    cells = spec["candidate_cells"] | {
+        "file": f"reports/{CELLS_DIR}/{name}.json under the data dir"
+    }
+    return spec | {
+        "ticket": TICKET_V2,
+        "status": f"pre-registered by Claude under ticket #{TICKET_V2}, on the same rules as "
+        f"#{TICKET}'s (see decisions); frozen in the registry (--freeze --family v2) before any "
+        "scored read; no owner sign-off",
+        "v2": {
+            "of": f"{FAMILY_ID}: the same hypothesis, variants, folds, settlement, N5 and cells; "
+            f"{FAMILY_ID}'s spec, records, report and cells stay as they are",
+            "data_fingerprint": "the first 16 hex of the sha256 of the canonical JSON of the "
+            "run's data builds (the records' data_builds) and its development day list, from "
+            "listdir and stat only",
+            "report": f"reports/{name}.md under the data dir",
+            "overwrite": "refused: a run whose report or cell file exists raises FileExistsError "
+            "before any store file is opened and appends nothing; an exact rerun (same spec, "
+            "same data) is such a run",
+            "leaderboard": "the leaderboard reads the newest cell file of a spec hash (or one "
+            "named explicitly), so a rerun's cells replace the earlier run's there",
+        },
+        "candidate_cells": cells,
+        "trials": {"rule": f"none of its own: a trial (--trial) is {FAMILY_ID}'s"},
+    }
+
+
+def _check_family(family: str) -> None:
+    if family not in FAMILIES:
+        raise ValueError(f"family must be one of {', '.join(FAMILIES)}, got {family!r}")
+
+
+def build_spec(*, date_from: date, date_to: date, seed: int, family: str = FAMILY_ID) -> dict:
+    """The family's pre-registered spec (docs/specs/cross-pool-prereg.md), plain JSON: v1's by
+    default, v2's (`FAMILY_ID_V2`, #562) on request."""
+    _check_family(family)
     scheme = load_country_scheme(COUNTRY)
-    return _spec(
-        date_from=date_from, date_to=date_to, seed=seed, family_id=FAMILY_ID, scheme=scheme
-    )
+    spec = _spec(date_from=date_from, date_to=date_to, seed=seed, family_id=family, scheme=scheme)
+    return _v2(spec) if family == FAMILY_ID_V2 else spec
 
 
 def _trial_spec(*, date_from: date, date_to: date, seed: int) -> dict:
@@ -1185,12 +1236,17 @@ def _trial_spec(*, date_from: date, date_to: date, seed: int) -> dict:
 
 
 def freeze_spec(
-    *, date_from: date, date_to: date, seed: int, registry: Registry | None = None
+    *,
+    date_from: date,
+    date_to: date,
+    seed: int,
+    registry: Registry | None = None,
+    family: str = FAMILY_ID,
 ) -> str:
     """Freeze the family's spec for these arguments in `registry` and return its hash."""
-    spec = build_spec(date_from=date_from, date_to=date_to, seed=seed)
+    spec = build_spec(date_from=date_from, date_to=date_to, seed=seed, family=family)
     registry = default_registry(COUNTRY) if registry is None else registry
-    return registry.freeze_family(FAMILY_ID, spec)
+    return registry.freeze_family(family, spec)
 
 
 # --------------------------------------------------------------------------- reading
@@ -1266,6 +1322,13 @@ def _builds(files: list[tuple[date, Path]], builds: dict[str, str]) -> None:
             raise
         stamp = hashlib.sha256(f"{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()[:16]
         builds[f"jravan_{name}"] = f"processed/{SOURCE}/{name}.parquet@{stamp}"
+
+
+def data_fingerprint(files: list[tuple[date, Path]], builds: dict[str, str]) -> str:
+    """The run's data fingerprint (#562): 16 hex of the sha256 of its fingerprinted builds and its
+    development day list; no store file is opened, and the data dir's location is not in it."""
+    data = {"builds": builds, "days": [day.isoformat() for day, _ in files]}
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _features(files, log) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, int], float]:
@@ -1541,6 +1604,7 @@ class CrossPoolResult:
     date_from: date | None = None
     date_to: date | None = None
     seed: int | None = None
+    data_fingerprint: str = ""  # of the data the run read (`data_fingerprint`); v2's file names
     # pool -> {scorer: why}: the (scorer, pool)s with nothing settled; the rest are kept
     unavailable_pools: dict[str, dict[str, str]] = field(default_factory=dict)
 
@@ -1686,7 +1750,7 @@ def _record(variant, spec, spec_hash, git_sha, builds, metrics, failed):
         hypothesis_id=HYPOTHESIS,
         family_id=spec["family_id"],
         variant=variant,
-        ticket=TICKET,
+        ticket=spec["ticket"],
         git_sha=git_sha,
         data_builds=builds,
         sources=(SOURCE,),
@@ -1708,11 +1772,13 @@ def _append(registry: Registry, records: list[RunRecord]) -> list[str]:
     return [registry.append(r) for r in records if r not in existing]
 
 
-def _not_frozen(registry: Registry, frozen: str | None, spec_hash: str) -> FamilyNotFrozen:
+def _not_frozen(
+    registry: Registry, family: str, frozen: str | None, spec_hash: str
+) -> FamilyNotFrozen:
     """The refusal, naming the frozen spec's --from, --to and --seed when another is frozen."""
     if frozen is None:
         return FamilyNotFrozen(
-            f"family {FAMILY_ID!r} is not frozen: run --freeze with this run's --from, --to and "
+            f"family {family!r} is not frozen: run --freeze with this run's --from, --to and "
             f"--seed first (spec {spec_hash[:12]})"
         )
     named = ""
@@ -1727,7 +1793,7 @@ def _not_frozen(registry: Registry, frozen: str | None, spec_hash: str) -> Famil
     except (OSError, ValueError, KeyError, TypeError):
         pass
     return FamilyNotFrozen(
-        f"family {FAMILY_ID!r} is frozen with another spec ({frozen[:12]}{named}), not this run's "
+        f"family {family!r} is frozen with another spec ({frozen[:12]}{named}), not this run's "
         f"({spec_hash[:12]}): run with the frozen --from, --to and --seed (a second --freeze "
         "raises FamilyAlreadyFrozen)"
     )
@@ -1742,22 +1808,30 @@ def run_cross_pool(
     registry: Registry | None = None,
     log: Callable[[str], None] | None = None,
     trial: bool = False,
+    family: str = FAMILY_ID,
 ) -> CrossPoolResult:
     """Run the frozen family on the development days of the span (see the module doc); with
     `trial`, a trial: no freeze needed, the `TRIAL_SCHEME` folds, records in `TRIAL_FAMILY_ID`.
+    `family` is v1's (`FAMILY_ID`) by default; v2's (`FAMILY_ID_V2`, #562) names its report and
+    cells by the run's data fingerprint and never overwrites one.
 
     Raises `PreReformPriceError` for a span before 2014-06-07, `FamilyNotFrozen` unless the
     registry froze this spec (not for a trial), and `paths.DataDirInsideRepo` for an `out_dir`
-    inside the repository, each before any store file is opened."""
+    inside the repository, each before any store file is opened; for v2, `FileExistsError` when
+    its report or cell file exists, after the store's listing and stat but before any file is
+    opened and with nothing appended."""
     log = log or (lambda message: None)
+    _check_family(family)
+    if trial and family != FAMILY_ID:
+        raise ValueError(f"a trial is {FAMILY_ID}'s; {family} has none")
     _check_span(date_from, date_to)
     registry = default_registry(COUNTRY) if registry is None else registry
     span = {"date_from": date_from, "date_to": date_to, "seed": seed}
-    spec = _trial_spec(**span) if trial else build_spec(**span)
+    spec = _trial_spec(**span) if trial else build_spec(**span, family=family)
     family = spec["family_id"]
     spec_hash = _spec_hash(spec)
-    if not trial and (frozen := registry.frozen_spec_hash(FAMILY_ID)) != spec_hash:
-        raise _not_frozen(registry, frozen, spec_hash)
+    if not trial and (frozen := registry.frozen_spec_hash(family)) != spec_hash:
+        raise _not_frozen(registry, family, frozen, spec_hash)
     scheme = FoldScheme(**spec["folds"]["scheme"])
     paths.outside_repo(Path(out_dir), what="out")
     out_dir = Path(out_dir)
@@ -1766,9 +1840,23 @@ def run_cross_pool(
     boot = spec["bootstrap"]
     builds = _build_names()
     settled = _Settled()
+
+    def failed_records() -> None:  # the run is a record too: every variant failed
+        _append(
+            registry, [_record(v, spec, spec_hash, git_sha, builds, (), True) for v in VARIANTS]
+        )
+
     try:  # from the store's discovery on, a crash is a failed record of every variant
         files, held = _day_files(date_from, date_to)
         _builds(files, builds)
+    except Exception:
+        failed_records()
+        raise
+    fingerprint = data_fingerprint(files, builds)
+    report_path, cells_path = _artifact_paths(out_dir, family, spec_hash, fingerprint)
+    if family == FAMILY_ID_V2:  # a refusal, not a run: no record
+        _refuse_existing(report_path, cells_path)
+    try:
         log(f"reading {len(files)} development day files")
         feats, pair_feats, pair_counts, per_day = _features(files, log)
         rows, counts, races = _study_rows(feats, date_from, date_to)
@@ -1797,10 +1885,8 @@ def run_cross_pool(
         log(f"settling (peak {_peak_gb():.2f} GB)")
         _settle_win(rows, folds, walk, date_from, date_to, boot, counts, log, family, settled)
         _settle_pairs(pairs, pair_folds, pair_walk, boot, log, family, settled)
-    except Exception:  # the run is a record too: every variant failed
-        _append(
-            registry, [_record(v, spec, spec_hash, git_sha, builds, (), True) for v in VARIANTS]
-        )
+    except Exception:
+        failed_records()
         raise
     errors = {**walk.errors, **pair_walk.errors}
     failed = [v for v in VARIANTS if v in errors]
@@ -1841,10 +1927,6 @@ def run_cross_pool(
         for v in VARIANTS
     ]
     run_ids = _append(registry, records)
-    stem = f"cross-pool-japan-{spec_hash[:12]}" + ("-trial" if trial else "")
-    report_path = out_dir / f"{stem}.md"
-    cells_name = "cross-pool-trial.json" if trial else "cross-pool.json"
-    cells_path = out_dir / "candidate-cells" / cells_name
     result = CrossPoolResult(
         family_id=family,
         spec_hash=spec_hash,
@@ -1862,11 +1944,13 @@ def run_cross_pool(
         date_from=date_from,
         date_to=date_to,
         seed=seed,
+        data_fingerprint=fingerprint,
         unavailable_pools=unavailable,
     )
     about = {
         "family": f"`{family}`, spec sha256 `{spec_hash}`, family size {result.family_size}",
         "trial": f"yes: not frozen, never written to `{FAMILY_ID}`" if trial else "no",
+        "data fingerprint": fingerprint,
         "fold scheme": json.dumps(spec["folds"]["scheme"], sort_keys=True),
         "git": git_sha,
         "store": ", ".join(builds.values()),
@@ -1876,11 +1960,37 @@ def run_cross_pool(
         "peak RSS": f"{_peak_gb():.2f} GB",
         "written (UTC)": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    write_report(report_path, render_report(result, errors, about), sources=(SOURCE,))
+    report = render_report(result, errors, about)
     text = json.dumps(cells, indent=1, allow_nan=False, ensure_ascii=False) + "\n"
+    if family == FAMILY_ID_V2:  # again: another run may have written them meanwhile
+        _refuse_existing(report_path, cells_path)
+    write_report(report_path, report, sources=(SOURCE,))
     write_report(cells_path, text, sources=(SOURCE,))
     log(f"done: {report_path}")
     return result
+
+
+def _artifact_paths(out_dir: Path, family: str, spec_hash: str, fingerprint: str):
+    """The private report and the cell file: v1's (and a trial's) by the spec hash alone, as
+    #435 ran them; v2's by the spec hash and the run's data fingerprint (#562)."""
+    stem = f"cross-pool-japan-{spec_hash[:12]}"
+    if family == FAMILY_ID_V2:
+        stem += f"{DATA_MARK}{fingerprint}"
+        return out_dir / f"{stem}.md", out_dir / CELLS_DIR / f"{stem}.json"
+    trial = family == TRIAL_FAMILY_ID
+    cells_name = "cross-pool-trial.json" if trial else "cross-pool.json"
+    stem += "-trial" if trial else ""
+    return out_dir / f"{stem}.md", out_dir / CELLS_DIR / cells_name
+
+
+def _refuse_existing(*targets: Path) -> None:
+    """v2 never overwrites a report or cell file (#562): an existing one is an error."""
+    for target in targets:
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(
+                f"{target} exists: a v2 run never overwrites an earlier run's report or cells "
+                "(the same spec on the same data is that run again)"
+            )
 
 
 # --------------------------------------------------------------------------- reports
@@ -1995,6 +2105,15 @@ def render_public_report(result: CrossPoolResult) -> str:
     if result.date_from is not None and result.date_to is not None:
         span = f" --from {result.date_from.isoformat()} --to {result.date_to.isoformat()}"
     seed = "" if result.seed is None else f" --seed {result.seed}"
+    ticket, intro, flag, data = TICKET, f"Ticket #{TICKET} (epic #73, N4).", "", []
+    if result.family_id == FAMILY_ID_V2:  # #562: v1's page stays as #435 wrote it
+        ticket, flag = TICKET_V2, " --family v2"
+        intro = f"Ticket #{TICKET_V2}: the v2 family of #{TICKET}'s study (epic #73, N4)."
+        data = [
+            f"- Data fingerprint `{result.data_fingerprint}` (a hash of the store's builds and "
+            "day list, in the private files' names); a rerun on other data writes new files "
+            "beside these, and a rerun on the same data is refused, never an overwrite.",
+        ]
     rows = [
         f"| `{v}` | {', '.join(_features_of(v))} | {v.split(':')[1]} | "
         f"{'failed' if v in failed else 'scored'} | {withheld} | {withheld} |"
@@ -2010,9 +2129,9 @@ def render_public_report(result: CrossPoolResult) -> str:
     ]
     lines = [
         f"# Experiment report: E25, the T-2 cross-pool signal at the final price (Japan, "
-        f"#{TICKET})",
+        f"#{ticket})",
         "",
-        f"Ticket #{TICKET} (epic #73, N4). **Nothing is adopted.** **Every figure is withheld "
+        f"{intro} **Nothing is adopted.** **Every figure is withheld "
         "(D21).** The study reads the JRA-VAN time-series boards and the jravan final odds, "
         "results and dividends, a licensed source, so this page says what ran and where its "
         "figures live. It gives no count, span, coefficient, gain, return, rate, sign or bound "
@@ -2025,8 +2144,9 @@ def render_public_report(result: CrossPoolResult) -> str:
         f"each: {run_ids}. Failed: {', '.join(f'`{v}`' for v in sorted(failed)) or 'none'}.",
         f"- Private report: `{_data_relative(result.report_path)}`. Candidate cells (every "
         f"settled selection and N5 band, ranked): `{_data_relative(result.cells_path)}`.",
+        *data,
         "- Code: `countries/japan/studies/cross_pool_run.py`. Reproduce with `uv run python -m "
-        f"horsetrack.countries.japan.studies.cross_pool_run --run{span}{seed}`.",
+        f"horsetrack.countries.japan.studies.cross_pool_run --run{flag}{span}{seed}`.",
         "- Holdout: development days only. A holdout day's file is dropped by its name and never "
         "opened (D14); `LockedHoldout` is not opened; nothing before 2014-06-07 enters (D10).",
         "",
@@ -2101,13 +2221,13 @@ def _index_family(line: str) -> str | None:
 
 
 def write_committed_summary(registry) -> None:
-    """This study's family files, by `write_summary` over `FAMILY_ID` and `TRIAL_FAMILY_ID` of
+    """This study's family files, by `write_summary` over `FAMILIES` and `TRIAL_FAMILY_ID` of
     `registry`, and the committed index with their lines added, ordered by family id: every
     family the index lists stays (#131's legacy '/' ids, filed as '--', included), and no other
     family's file is written, so a fresh local registry drops nothing and no other ticket's
     uncommitted family enters (#92's `write_committed_summary`)."""
     directory = summary_dir(COUNTRY)
-    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
+    mine = _Families(registry, {*FAMILIES, TRIAL_FAMILY_ID})
     if not mine.records():
         return
     with tempfile.TemporaryDirectory() as scratch:
@@ -2155,12 +2275,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--out", type=Path, default=None, help="report directory, outside the repo")
     parser.add_argument("--seed", type=int, default=TICKET, help=f"bootstrap seed ({TICKET})")
+    parser.add_argument(
+        "--family",
+        choices=sorted(CLI_FAMILIES),
+        default="v1",
+        help=f"v1 ({FAMILY_ID}, default) or v2 ({FAMILY_ID_V2}: files named by the data, #562)",
+    )
     args = parser.parse_args(argv)
+    family = CLI_FAMILIES[args.family]
+    if args.trial and family != FAMILY_ID:
+        parser.error(f"--trial is {FAMILY_ID}'s; --family v2 has no trial")
     registry = default_registry(COUNTRY)
     span = {"date_from": args.date_from, "date_to": args.date_to, "seed": args.seed}
     if args.freeze:
-        spec_hash = freeze_spec(**span, registry=registry)
-        print(json.dumps({"family_id": FAMILY_ID, "spec_hash": spec_hash}, indent=2))
+        spec_hash = freeze_spec(**span, registry=registry, family=family)
+        print(json.dumps({"family_id": family, "spec_hash": spec_hash}, indent=2))
         return 0
     out_dir = paths.reports_dir() if args.out is None else args.out
     result = run_cross_pool(
@@ -2169,17 +2298,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         registry=registry,
         log=lambda message: print(message, file=sys.stderr),
         trial=args.trial,
+        family=family,
     )
     write_committed_summary(registry)
     public = None
     if not args.trial:  # the family's page; a trial's records are in the registry summary
-        public = env.repo_root() / "docs" / "experiments" / "cross-pool-japan.md"
+        public = env.repo_root() / "docs" / "experiments" / PUBLIC_PAGES[family]
         write_report(public, render_public_report(result), sources=())
     print(
         json.dumps(
             {
                 "family_id": result.family_id,
                 "spec_hash": result.spec_hash,
+                "data_fingerprint": result.data_fingerprint,
                 "report_path": str(result.report_path),
                 "cells_path": str(result.cells_path),
                 "run_ids": [r[:16] for r in result.run_ids],
