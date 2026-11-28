@@ -7,12 +7,18 @@ holdout exclusion pushed into the scan as one dataset expression
 (`core.eval.holdout.file_development_filter`, #415: #71's `is_holdout_day`, looked up at call
 time, so an open-ended `end=date.max` asks it only about the file's days). The scan is a
 `ds.dataset` of the file's path served from that handle (`_Snapshot`, a one-file read-only
-filesystem), so the bounds and the rows come from one snapshot and the read is a dataset scan
-with the predicate as its filter. No holdout row is materialized;
-Parquet prunes row groups only by their min/max statistics, so a row group mixing development and
-holdout days is still read from disk and its holdout rows are dropped by the scan's filter. A
-read that touches prices may not start before D10's price era (2014-06-07), whichever the source:
-the requested start is checked, before any clamping.
+filesystem whose file is the handle itself, read by byte range), so the bounds and the rows come
+from one snapshot (a file atomically replaced meanwhile is read as it was) and the read is a
+dataset scan with the predicate as its filter, its rows in file order. No holdout row is
+materialized. The scan skips each row group whose race_date statistics rule the predicate out,
+and reads the column chunks of the others one by one (no pre-buffering, whose coalesced reads
+could span a skipped group): a group holding one day (min == max, no null), as the jravan
+builders write `final_odds`, `pool_votes`, `races` and `runners` (#502), is never opened when its
+day is a holdout day or outside the range, so a development read decodes no byte of a holdout day
+there (D14). A group mixing days (a store not yet rebuilt, a group per year), or without
+statistics, is still read from disk and its holdout rows are dropped by the scan's filter. A read
+that touches prices may not start before D10's price era (2014-06-07), whichever the source: the
+requested start is checked, before any clamping.
 
 When #46 lands, this may delegate to its `read_table`.
 """
@@ -34,6 +40,8 @@ PRICE_ERA_START = date(2014, 6, 7)
 COUNTRY = "japan"
 SOURCE = "jra"
 DATE_COLUMN = "race_date"
+# Each column chunk read on its own: a pre-buffer coalesces nearby ranges, across a skipped group.
+_SCAN_OPTIONS = ds.ParquetFragmentScanOptions(pre_buffer=False)
 
 
 class PreReformPriceError(ValueError):
@@ -81,18 +89,19 @@ def read_store_table(
         keep = file_development_filter(
             handle, COUNTRY, start=start, end=end, where=where, column=DATE_COLUMN
         )
-        return dataset.to_table(columns=columns, filter=keep)
+        return dataset.to_table(columns=columns, filter=keep, fragment_scan_options=_SCAN_OPTIONS)
 
 
 class _Snapshot(pafs.FileSystemHandler):
-    """A read-only filesystem holding the one file `path`, served zero-copy from the memory map
-    `handle`: a dataset of `path` on it reads the snapshot the handle opened, even after the file
-    is atomically replaced on disk."""
+    """A read-only filesystem holding the one file `path`, served by the open handle `handle`
+    itself (positional reads of the byte ranges asked, never a buffer of the whole file): a
+    dataset of `path` on it reads the snapshot the handle opened, even after the file is
+    atomically replaced on disk."""
 
-    def __init__(self, path: str, handle: pa.MemoryMappedFile) -> None:
+    def __init__(self, path: str, handle: pa.NativeFile) -> None:
         self.path = path
-        handle.seek(0)
-        self.buffer = handle.read_buffer()  # the whole map, not a copy
+        self.handle = handle
+        self.size = handle.size()
 
     def get_type_name(self) -> str:
         return "snapshot"
@@ -102,7 +111,7 @@ class _Snapshot(pafs.FileSystemHandler):
 
     def get_file_info(self, paths: list[str]) -> list[pafs.FileInfo]:
         return [
-            pafs.FileInfo(p, pafs.FileType.File, size=self.buffer.size)
+            pafs.FileInfo(p, pafs.FileType.File, size=self.size)
             if p == self.path
             else pafs.FileInfo(p, pafs.FileType.NotFound)
             for p in paths
@@ -114,9 +123,10 @@ class _Snapshot(pafs.FileSystemHandler):
     def open_input_file(self, path: str) -> pa.NativeFile:
         if path != self.path:
             raise FileNotFoundError(path)
-        return pa.BufferReader(self.buffer)
+        return self.handle
 
-    open_input_stream = open_input_file
+    def open_input_stream(self, path: str) -> pa.NativeFile:
+        raise NotImplementedError("a snapshot is read by byte range, not as a stream")
 
     def _read_only(self, *args: object, **kwargs: object) -> None:
         raise PermissionError("a store snapshot is read-only")

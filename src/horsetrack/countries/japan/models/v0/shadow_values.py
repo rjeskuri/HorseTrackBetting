@@ -32,6 +32,7 @@ sums over the ordered first three. It sits beside the values and never enters a 
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import permutations
@@ -103,6 +104,14 @@ class ShadowValue:
     value_at_low: float | None
     value_at_high: float | None
     reason: str | None = None  # why the row has no value when its pool could not be drawn
+
+
+def point_seed(seed: int, race_id: str, tau: int) -> int:
+    """The draws' seed of one (race, tau): a stable hash of (seed, race_id, tau), the same on every
+    run and machine, so a record's values can be recomputed from its board. Shadow-day and the
+    shadow feed both seed their draws with it (moved here from shadow/day.py by #564)."""
+    digest = hashlib.sha256(f"{int(seed)}|{race_id}|{int(tau)}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
 
 
 def _shocks(runners: list[int], n_draws: int, seed: int) -> dict[int, np.ndarray]:
