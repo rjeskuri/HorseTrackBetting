@@ -1203,6 +1203,17 @@ def test_jrdb_fed_results_are_written_outside_the_tree(run_a, run_b, tmp_path, m
 # ---------------------------------------------------------------------------------------------
 
 
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")  # as tests/test_cli.py
+
+
+def _help(*command: str):
+    """`--help` of a command and its text without ANSI escapes: typer forces colour under CI
+    (GITHUB_ACTIONS, FORCE_COLOR), and Rich styles `-` and `-family` apart; a wide console keeps
+    Rich from wrapping or eliding an option name at the runner's width."""
+    result = CliRunner().invoke(app, [*command, "--help"], env={"COLUMNS": "200", "NO_COLOR": "1"})
+    return result, _ANSI.sub("", result.output)
+
+
 def test_the_japan_command_is_registered():
     result = CliRunner().invoke(app, ["japan", "exotic-c5", "--help"])
     assert result.exit_code == 0, result.output
@@ -1694,9 +1705,9 @@ def test_per_ticket_jrdb_fed_results_stay_out_of_the_tree(pt_a, pt_b):
 
 
 def test_the_command_runs_the_per_ticket_family(pt_a):
-    shown = CliRunner().invoke(app, ["japan", "exotic-c5", "--help"])
+    shown, text = _help("japan", "exotic-c5")
     assert shown.exit_code == 0, shown.output
-    assert "--family" in shown.output
+    assert re.search(r"(?m)^\W*--family\s", text), text  # an option of the command, by its name
     stdout = pt_a.cli.stdout
     printed = json.loads(stdout[stdout.index("{") : stdout.rindex("}") + 1])
     assert printed["family_id"] == exotic_c5.PER_TICKET_FAMILY_ID
