@@ -44,7 +44,10 @@ Reading the candidate files keeps every cell on the record:
 
 Capacity (#491): every row goes through ``with_capacity`` with #432's depth tables under the
 reports dir (``pool_depth.read_depth_tables``). A candidate row names its depth cell by its
-'pool', 'class_group' and 'odds_band'; a row in a cell with a capacity carries it at every edge
+'pool', 'class_group' and 'odds_band'; a registry row of the pool scan (#429/#450, families
+``japan-n1-pool-scan[-v<N>]-cells-<pool>``, variant the cell id) names it by its family's pool
+suffix and a cell id of exactly 'class:<group>&band:<band>' (any other cell id names no depth
+cell), its own fields unchanged. A row in a cell with a capacity carries it at every edge
 and quantile of the table, and every other row carries a ``capacity_note`` saying why it has
 none (``NO_TABLE``, ``NO_CELL_NAMED``, ``CO_PLACER``, ``NO_CELL``, ``NO_FIGURE``). The figures
 are JRA-VAN: the private texts show them, the public one shows ``withheld (D21)``.
@@ -103,6 +106,8 @@ CO_PLACER = "co-placer pool: no single-winner capacity"
 NO_CELL = "the depth table has no such cell"
 NO_FIGURE = "the depth cell has no capacity figure"
 _CAPACITY = re.compile(r"capacity_(.+)")
+# #429/#450's pool-scan cell families: one per scan version and pool (lower case), a run per cell
+_POOL_SCAN = re.compile(r"japan-n1-pool-scan(?:-v\d+)?-cells-(?P<pool>[a-z_]+)")
 
 # #430's candidate-cell keys; 'selection', 'sources' and 'ticket' are optional.
 SCHEMA = (
@@ -368,21 +373,36 @@ def _capacity_cells(depth: pd.DataFrame) -> dict[_Key, list[tuple[float, float, 
     return cells
 
 
+def _depth_key(row: LeaderboardRow) -> tuple[str | None, str | None, str | None]:
+    """The (pool, class group, band) a row names: its own fields, or for a pool-scan registry
+    row (no pool of its own) its family's pool and its 'class:<group>&band:<band>' cell id."""
+    scan = _POOL_SCAN.fullmatch(row.family_id)
+    prefix = f"{row.family_id}/"
+    if row.pool is not None or scan is None or not row.option_id.startswith(prefix):
+        return row.pool, row.class_group, row.odds_band
+    cuts = [part.partition(":")[::2] for part in row.option_id[len(prefix) :].split("&")]
+    parts = dict(cuts)
+    if len(cuts) != 2 or set(parts) != {"class", "band"} or not all(parts.values()):
+        return scan["pool"].upper(), None, None  # all, one dimension, or another cut
+    return scan["pool"].upper(), parts["class"], parts["band"]
+
+
 def _capacity_of(
     row: LeaderboardRow, cells: dict[_Key, list[tuple[float, float, float]]] | None
 ) -> LeaderboardRow:
     note = None
     entries: list[tuple[float, float, float]] = []
+    pool, group, band = _depth_key(row)
     if cells is None:
         note = NO_TABLE
-    elif row.pool is None or row.class_group is None or row.odds_band is None:
+    elif pool is None or group is None or band is None:
         note = NO_CELL_NAMED
-    elif row.pool in pool_depth.CO_PLACER:
+    elif pool in pool_depth.CO_PLACER:
         note = CO_PLACER
-    elif (row.pool, row.class_group, row.odds_band) not in cells:
+    elif (pool, group, band) not in cells:
         note = NO_CELL
     else:
-        entries = cells[(row.pool, row.class_group, row.odds_band)]
+        entries = cells[(pool, group, band)]
         note = None if entries else NO_FIGURE
     found: dict[tuple[float, float], float] = {}
     for e, q, s in entries:  # one stake per (edge, quantile): the table's first

@@ -488,3 +488,148 @@ def test_the_command_shows_the_capacity_privately_and_withholds_it_publicly(
     figures = tlb.SEEDED_FIGURES | all_figures()
     tlb.assert_no_figure(out, figures)
     tlb.assert_no_figure(err, figures)
+
+
+# --------------------------------------------------------------------------- the pool scan's runs
+
+# #429/#450's pool-scan cell runs as the registry holds them: one family per scan version and pool,
+# 'japan-n1-pool-scan[-v<N>]-cells-<pool, lower case>', one run per cell, its variant (and
+# params['cell']) the cell id, a class:<group>&band:<band> cell naming one depth cell, its
+# params['pool'] the pool as the depth table spells it. No leaderboard block: an unmeasured row
+# '<family>/<cell id>', segment 'all', pool None, which only its family and variant place in a cell.
+SCAN_SPAN = "from-2014-06-07"
+
+
+def pool_scan_family(pool: str, version: int = 1) -> str:
+    return f"japan-n1-pool-scan{'' if version == 1 else f'-v{version}'}-cells-{pool.lower()}"
+
+
+def pool_scan_run(pool: str, cell_id: str, *, version: int = 1, seed: int = 0):
+    """A pool-scan cell run shaped as the real registry's (every figure made up)."""
+
+    def metric(name: str, value: float):
+        return tlb.FoldMetric(
+            fold=SCAN_SPAN, metric=name, value=value, lo=None, hi=None, n=640 + seed
+        )
+
+    return tlb.record(
+        hypothesis_id="E8",
+        family_id=pool_scan_family(pool, version),
+        variant=cell_id,
+        ticket=429,
+        sources=("jravan",),
+        data_builds={"final_odds": tlb.BUILD_HASH},
+        fold_scheme="in-sample:development-days",
+        components={"bet": "flat_box_final_board"},
+        params={
+            "cell": cell_id,
+            "end": "2026-11-27",
+            "pool": pool,
+            "seed": 0,
+            "span": SCAN_SPAN,
+            "start": "2014-06-07",
+        },
+        metrics=(
+            metric("mean_return", 0.71 + 0.01 * seed),
+            metric("flat_rho", 0.93 + 0.001 * seed),
+            metric("n_meetings", 88.0 + seed),
+            metric("se_mean_return", 0.02),
+        ),
+    )
+
+
+def pool_scan_id(pool: str, cell_id: str, version: int = 1) -> str:
+    return f"{pool_scan_family(pool, version)}/{cell_id}"
+
+
+# (pool, cell id, scan version) -> the depth cell it names; each dimension varied against the first
+POOL_SCAN_JOINS = {
+    ("WIN", "class:maiden&band:5-10", 1): ("WIN", "maiden", "5-10"),
+    ("WIN", "class:maiden&band:5-10", 2): ("WIN", "maiden", "5-10"),  # v2: no candidate copy
+    ("WIN", "class:newcomer&band:5-10", 3): ("WIN", "newcomer", "5-10"),  # the class differs
+    ("WIN", "class:maiden&band:10-20", 4): ("WIN", "maiden", "10-20"),  # the band differs
+    ("QUINELLA", "class:maiden&band:5-10", 5): ("QUINELLA", "maiden", "5-10"),  # the pool differs
+}
+
+
+def test_build_rows_joins_the_pool_scans_registry_cells(reg, tmp_path):
+    """Review of #491 (outline item 1, DoD 'its cell's capacity at 5, 10 and 20%'): a registry
+    row of the pool scan (#450) is a pool x class x band depth cell, named by its family's
+    '-cells-<pool>' suffix and its 'class:<group>&band:<band>' cell id, so with a depth table
+    under depth_dir it carries that cell's capacity at every edge and quantile, in every scan
+    version (v1/v2 have no candidate copy), with no candidate file at all."""
+    for i, (pool, cell_id, version) in enumerate(POOL_SCAN_JOINS):
+        reg.append(pool_scan_run(pool, cell_id, version=version, seed=i))
+    depth_dir = tmp_path / "depth"
+    depth_dir.mkdir()
+    depth.write_depth_table(depth_frame(), depth_dir)
+
+    rows = tlb.unique(
+        lb().build_rows(registry=reg, candidate_dir=tmp_path / "no-cells", depth_dir=depth_dir)
+    )
+
+    for (pool, cell_id, version), cell in POOL_SCAN_JOINS.items():
+        option = pool_scan_id(pool, cell_id, version)
+        assert option in rows, f"{option} is not a leaderboard row: {sorted(rows)}"
+        assert_carries(rows[option], cell)
+        assert not (rows[option].capacity_note or "").strip(), (
+            f"{option} carries its capacity and a reason it has none: {rows[option].capacity_note}"
+        )
+
+
+def test_a_pool_scan_cell_without_a_depth_cell_states_the_right_reason(reg, tmp_path):
+    """A pool-scan registry cell names its depth cell, so when the table lacks it the reason is
+    the one a candidate row in the same missing cell gets (no such cell), never that it names no
+    class group or odds band; a Wide or Place scan cell gets the co-placer reason (Wide's
+    'quinella_place' suffix is QUINELLA_PLACE, not Quinella, whose cell has a capacity); a scan
+    cell that names no class or no band (all, band only, class only, class x favourite or pool
+    size) gets the reason a candidate row naming as little gets."""
+    frame = depth_frame()
+    missing = {
+        ("WIN", "class:graded&band:ge50"): ("WIN", "graded", "ge50"),
+        ("WIN", "class:maiden&band:lt2"): ("WIN", "maiden", "lt2"),
+        ("TRIO", "class:maiden&band:10-30"): ("TRIO", "maiden", "10-30"),  # no TRIO cells at all
+    }
+    co_placer = {
+        ("QUINELLA_PLACE", "class:maiden&band:5-10"): ("QUINELLA_PLACE", "maiden", "5-10"),
+        ("PLACE", "class:maiden&band:1.5-2"): PLACE_CELL,
+    }
+    unnamed = {  # cell id -> the (class group, band) it names
+        "all": (None, None),
+        "band:5-10": (None, "5-10"),
+        "class:maiden": ("maiden", None),
+        "class:maiden&fav:le1.9": ("maiden", None),
+        "class:maiden&pool_size:high": ("maiden", None),
+    }
+    for i, (pool, cell_id) in enumerate([*missing, *co_placer]):
+        reg.append(pool_scan_run(pool, cell_id, version=1 + i % 5, seed=i))
+    for i, cell_id in enumerate(unnamed):
+        reg.append(pool_scan_run("WIN", cell_id, version=3, seed=10 + i))
+    depth_dir = tmp_path / "depth"
+    depth_dir.mkdir()
+    depth.write_depth_table(frame, depth_dir)
+
+    rows = tlb.unique(
+        lb().build_rows(registry=reg, candidate_dir=tmp_path / "no-cells", depth_dir=depth_dir)
+    )
+
+    # the reasons a candidate row gets for the same cause, from the join already pinned above
+    def reason_for(**fields) -> str:
+        (joined,) = lb().with_capacity([make_row("japan-n491-synthetic/probe", **fields)], frame)
+        return assert_states_a_reason(joined)
+
+    no_class_or_band = reason_for(class_group=None, odds_band=None)
+    for i, ((pool, cell_id), cell) in enumerate(missing.items()):
+        option = pool_scan_id(pool, cell_id, 1 + i % 5)
+        want = reason_for(pool=cell[0], class_group=cell[1], odds_band=cell[2])
+        assert want != no_class_or_band
+        assert assert_states_a_reason(rows[option]) == want, option
+    for i, ((pool, cell_id), cell) in enumerate(co_placer.items(), start=len(missing)):
+        option = pool_scan_id(pool, cell_id, 1 + i % 5)
+        want = reason_for(pool=cell[0], class_group=cell[1], odds_band=cell[2])
+        assert want != no_class_or_band
+        assert assert_states_a_reason(rows[option]) == want, option
+    for cell_id, (group, band) in unnamed.items():
+        option = pool_scan_id("WIN", cell_id, 3)
+        want = reason_for(pool="WIN", class_group=group, odds_band=band)
+        assert assert_states_a_reason(rows[option]) == want, option
