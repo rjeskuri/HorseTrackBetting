@@ -778,9 +778,13 @@ def compute_study(inputs: Inputs, spec: dict, scheme, plan: Plan = FULL, log=pri
     base = comp | {"score": "winner_log_loss", "baseline": "calibrated_market"}
     meta_params = params | {"ridge": 0.0, "bounds": "none", "quadratic": False, "segments": []}
     p = {}
-    for member in u:
-        outcome = _try(lambda m=member: _meta_oof(rows, scored_folds, stage2(m), "ln_q"))
-        pooled = _try(lambda m=member: _pooled(scored, stage2(m), "ln_q"))
+    for member in (BASE, *VARIANTS):  # a failed lineage member's metas fail too, recorded
+        if member in u:
+            outcome = _try(lambda m=member: _meta_oof(rows, scored_folds, stage2(m), "ln_q"))
+            pooled = _try(lambda m=member: _pooled(scored, stage2(m), "ln_q"))
+        else:
+            lost = RuntimeError(f"the lineage member failed: {failed.get(member)}")
+            outcome = pooled = _try(lambda lost=lost: _raise(lost))
         name = f"stage2:q:{member}"
         prior = {"prior": dict(VARIANTS[member])} if member in VARIANTS else {}
         study.attempt(
