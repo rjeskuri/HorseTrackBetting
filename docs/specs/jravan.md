@@ -783,16 +783,15 @@ availability rule for `runners.is_scratched`, `races.field_size`, `races.status`
 `meetings.status` is in docs/specs/as-of.md ("Accepted leak: results-derived card columns").
 
 Pre-race card versions can be kept by reading them before the race, each with the time it was
-read; nothing does today:
+read; the race-day card log does so since #426:
 
 - The JRA official 出馬表 on race day is the feed for it. `jra/official_card.py` parses a race's
   出馬表 page (JRADB `pw01dde`) into `races` and `racecard_runners` rows, the scratches as printed
-  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. The
-  logger does not fetch that page: `log-day` reads the 出馬表 menu and the card race list for the
-  post times only (`jra/capture.py`, `read_post_times`), nothing calls `official_card.parse`, and
-  no store table holds its rows. The logger would need to fetch each race's 出馬表 page from that
-  race list before the off, as often as a late scratch matters, and write the parsed rows with
-  their fetch time into a table whose availability rule is the owner's.
+  (`is_scratched`) and each runner row stamped `card_scraped_utc`, the page's fetch time. Since
+  #426, `log-day` fetches each race's 出馬表 page at the `cards` grid points before the off
+  (`jra/capture.py`, `capture_cards`) and appends the parsed rows with their fetch time to
+  `<VENUE>.cards.jsonl.gz` (docs/specs/odds-log.md, "Card log (ticket #426)", which holds the
+  owner's availability rule). No store table or as-of view reads them yet.
 - JV-Link's regular (non-setup) RACE reads during race week deliver versions `1` and `2` while
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
