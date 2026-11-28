@@ -317,11 +317,12 @@ inputs:
     layers: [C2]
     role: feature_at_t
     supplies:
-      - {source: jravan, table: records/SNPN/CK, column: _record}
+      - {source: jravan, table: career_counts, column: first}
     tickets: [407]
     note: >-
       JV-Data CK (each runner's placings so far, by surface, distance, going and venue, and its
-      jockey's and trainer's), dumped but not mapped into a table.
+      jockey's and trainer's), mapped into the long jravan table (#407); `first` stands for its
+      six placing-count columns.
 
   # ---------------------------------------------------------------------------------------------
   # C3: speed and par

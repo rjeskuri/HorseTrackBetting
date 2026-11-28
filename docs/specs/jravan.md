@@ -36,6 +36,7 @@ command run by hand. The same inputs give the same bytes.
 | `dividends` | `dividends.py` | `dividends` | store table | that of `dividends` |
 | `final-odds` | `odds.py` | `final_odds` | jravan-only | `label_only` |
 | `votes` | `votes.py` | `pool_votes` | jravan-only | `label_only` |
+| `career-counts` | `career_counts.py` | `career_counts` | jravan-only | `offset` on `race_date`, `offset_min: 0` (#407); versions made after the race date dropped |
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
@@ -233,8 +234,16 @@ post time a null `post_time_local`.
   and `win_fav_rank` (zero null) in store units; `sex` H, M, G; `age` as printed. `brand_raw`,
   `rating` and `gear_raw` are null. Each mapping's code values are constants in `runners.py`; a
   code a mapping lacks is null and counted.
-- Runners of abandoned races (RA data kubun 9) are written, without a place; their undrawn
-  runners carry 馬番 99 as printed.
+- Abandoned races (RA data kubun 9, `races.status` `abandoned`) are kept, and so are their
+  runners, written without a place. A runner that was never drawn is printed with 馬番 99; its
+  `horse_no` and `draw` are null (#394), only for 99, so no number is shared and `(race_id,
+  horse_no)` is unique where `horse_no` is set (`check_unique_horse_no` already skips nulls). The
+  table's sort key (`race_id`, `horse_no`, `horse_id`) puts the unnumbered runners last in their
+  race, by horse id. A reader keyed on `(race_id, horse_no)` drops or counts those rows apart
+  (`reconcile` counts them as `runners.<source>_unnumbered`); `horse_runs` keeps them as runs
+  with a null `draw`. A `runners.parquet` built before #394 still holds 99 there: rebuild it
+  (`horsetrack japan jravan runners`, full range, with every year's SE file present; see the
+  `reconcile` section) before relying on the null.
 - NAR and overseas runners (#377) go to `processed/jravan/form_runners.parquet` in the `runners`
   schema under their races' form ids, and their winners' times to `form_races.parquet` when it is
   there. Horse form only: the jravan `horse_runs` adds them with `win_odds` null (the price is
@@ -690,8 +699,23 @@ at a time, and changes neither store:
   `combination`). Over the matched rows it counts the equal fields (`RACE_FIELDS`,
   `RUNNER_FIELDS`; post times as minutes of the day, `finish_time_s` and `win_odds` at the
   tenth), the races whose Win odds all agree and those whose payouts all agree, and the rows whose
-  key repeats within a store. One-store and repeated-key counts are broken down by the race's
-  `status` in that store.
+  key repeats within a store. One-store, repeated-key and unnumbered counts are broken down by the
+  race's `status` in that store.
+- A runner with a null `horse_no` (jravan's undrawn runners of abandoned races) has no key: it
+  stays out of the runner merge and of `runners.<source>_duplicate`, and is counted as
+  `runners.<source>_unnumbered`. A matched race with a repeated runner key in either store does
+  not agree on Win odds, even when every value matches (a race whose runners cannot be keyed one
+  to one is not counted as agreeing), and nor does one with an unnumbered runner in either store.
+  `races.payouts_agree` is computed from the dividend rows only: a repeated runner key does not
+  change it (the owner's choice, 2026-11-28), and the key still shows in
+  `runners.<source>_duplicate`. The printed lines and the report legend say so.
+- An existing `runners.parquet` keeps the abandoned races' undrawn runners at horse number 99, so
+  `reconcile` run straight after this change still reports those duplicates. Run a full
+  `horsetrack japan jravan runners` rebuild first; only then does `reconcile` reflect the null
+  `horse_no`. Before it, check that the raw SE export has a year file for every year in the
+  existing store: the command reads the year files present (or only the `--year` ones) and
+  replaces `runners.parquet` in full, so a missing year loses its runners and its races' winner
+  times in `races.parquet` (`finish_time_s` is reset from the rebuilt runners), with no error.
 - The command prints the overall counts and rates; the detail by year, with up to 20 failing race
   ids per check, goes to `reports/jravan-reconcile.md` through `write_report`
   (`sources=('jravan', 'jra')`), which refuses the repository. Its figures come from a licensed
@@ -797,3 +821,60 @@ read; the race-day card log does so since #426:
   they are current. The export is a bulk read of the stored data (#196), and the Windows VM logs
   nothing between exports (no repository code runs there); keeping them would need a race-week
   reader on the VM and a folder of its own under `raw/jravan/`.
+
+## CK: career counts (#407)
+
+`horsetrack.countries.japan.jravan.career_counts` writes `processed/jravan/career_counts.parquet`
+from JV-Data CK (出走別着度数): per runner of a race, its placings so far under each condition, and
+its jockey's and trainer's this year and in total, as of that race. It is not in `schemas.TABLES`;
+its availability rule is the owner's (answer B on #407, 2026-11-28): `offset` on `race_date`,
+`offset_min: 0` in `config/availability.yaml`, so a view shows a race's rows from 00:00 JST of its
+race date (the card's rule), and the build drops any key whose kept version was made after the
+race date (a version made later could hold the race's own result), counting it in
+`created_after_race`. The table carries `horse_id`, not `horse_no` (CK has no 馬番); a join to the jravan `runners` table is
+on (`race_id`, `horse_id`).
+
+- `build_career_counts(*, raw=None, out=None, chunk_records=20_000) -> BuildReport` reads
+  `<raw>/stored/SNPN/CK/all.jvd` (one multi-GB file; no file is a `FileNotFoundError`) in two
+  steps, in bounded memory. One pass streams it through `records.iter_lines`: each record's type is
+  checked, then its race date is read from its 開催年 and 開催月日 bytes alone, and a record on a
+  holdout day is read no further, whatever its width, and counted only as `holdout_skipped`. Every
+  other record must be the layout's width (`RecordLengthError` with the file's record number); one
+  without a valid race date (`undated`) or outside the JRA venues 01-10 (`non_jra`) is dropped, and
+  the rest are spilled, undecoded, to one temporary file per race month beside the output (removed
+  when the build ends). Each month is then decoded alone: one version per key
+  (`records.latest_versions` on 開催年, 開催月日, 競馬場コード, 開催回, 開催日目, レース番号 and
+  血統登録番号; a key whose latest version is a deletion has no rows and counts in `deletions`,
+  whatever its date). A key whose kept version's データ作成年月日 is after its race date (開催年 +
+  開催月日) has no rows either and counts in `created_after_race`; a version made on the race date
+  is kept, and an earlier version never stands in for a later one. A blank or invalid
+  データ作成年月日 on a kept version cannot be shown to be on or before the race date, so it is
+  dropped and counted in `created_after_race` too. The kept records are sorted, and written as one
+  row group through a `ParquetWriter` (zstd) into a tmp file, then `os.replace`. Rows are sorted
+  by `race_id, horse_id, subject, period, condition` (plain string order); the same records, in any
+  order and at any chunk size, give the same bytes.
+- What bounds the build's memory: the streaming pass holds one chunk of `chunk_records` raw
+  records (and that chunk split by month) at a time; each spill file holds one race month, and the
+  decode reads, decodes and writes one month at a time (its raw bytes, decoded columns and Arrow
+  table, released before the next), so the peak follows the largest race month and the chunk
+  size, not the size of the CK file. The `ParquetWriter` keeps only the written row groups'
+  metadata.
+- `CAREER_COUNTS_SCHEMA`: `race_id` (`keys.race_id`), `race_date`, `horse_id` (血統登録番号; CK
+  has no 馬番), `subject` (`horse`, `jockey`, `trainer`), `subject_id`, `period` (`career`,
+  `this_year`), `condition`, and `first`, `second`, `third`, `fourth`, `fifth`, `unplaced` (int64,
+  null when not a number).
+- The rows come from the layout, never a list: a leaf whose name ends in `着回数` with six repeats
+  is a placing-counts item (1st to 5th and out of the first five), its `condition` the name
+  without `着回数` and a trailing `・` or `･` (`芝直・着回数` -> `芝直`). A top-level item is a
+  `horse` row (`subject_id` 血統登録番号, `period` `career`); a sub-item of the group whose name
+  holds `騎手` a `jockey` row (`subject_id` the top-level 騎手コード), of the one holding `調教師` a
+  `trainer` row (調教師コード); the group's first occurrence is `this_year` (本年), the second
+  `career` (累計). The owner's and breeder's groups and 脚質傾向 write no row.
+
+`horsetrack japan jravan career-counts` runs the build and writes `reports/jravan-career_counts.json`
+through `write_build_report`, counts only: `records`, `holdout_skipped`, `undated`, `non_jra`,
+`versions_dropped`, `deletions`, `created_after_race`, `kept` (runners with rows) and `rows`, and
+`rows` per race year; every record read counts once, `records = holdout_skipped + undated +
+non_jra + versions_dropped + deletions + created_after_race + kept`.
+The report holds no wall time or peak memory. The run's figures, its wall time and peak memory
+included, are withheld (D21) and stay out of the repository.

@@ -317,11 +317,11 @@ def build_spec(scheme, bootstrap: dict) -> dict:
 # --------------------------------------------------------------------------- inputs
 
 
-def read_runners() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The store's runners and races from RESULTS_FROM, column- and date-scoped, no price,
-    development days only."""
+def read_runners(race_columns=RACE_COLUMNS) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The store's runners and races (`race_columns`) from RESULTS_FROM, column- and
+    date-scoped, no price, development days only."""
     out = []
-    for name, columns in (("runners", RUNNER_COLUMNS), ("races", RACE_COLUMNS)):
+    for name, columns in (("runners", RUNNER_COLUMNS), ("races", list(race_columns))):
         table = read_store_table(
             name, columns=columns, start=RESULTS_FROM, end=date.max, touches_price=False
         )
@@ -461,43 +461,67 @@ def _codes(ids: pd.Series) -> np.ndarray:
     return codes
 
 
+def numeric_frame(frame: pd.DataFrame, columns=RATES) -> pd.DataFrame:
+    """A level-1 frame's fit columns with ids as codes (a missing entity id stays missing), so
+    copies are small: race_id, horse_id, finish_pos, the ENTITIES and the float `columns`."""
+    return pd.DataFrame(
+        {col: pd.factorize(frame[col].to_numpy(dtype=object))[0] for col in ("race_id", "horse_id")}
+        | {"finish_pos": frame["finish_pos"].to_numpy(dtype=float)}
+        | {col: _codes(frame[col]) for col in ENTITIES}
+        | {col: frame[col].to_numpy(dtype=float) for col in columns}
+    )
+
+
+def fit_entities(train: pd.DataFrame, min_levels: dict[str, int] | None = None) -> tuple:
+    """The ENTITIES a fit on `train` carries: each one, unless `min_levels` names it and the
+    training rows hold fewer distinct (non-missing) levels of it than that (a count of ids, no
+    outcome)."""
+    rule = min_levels or {}
+    return tuple(c for c in ENTITIES if c not in rule or train[c].nunique() >= rule[c])
+
+
 def level1_grid(
     frame: pd.DataFrame,
     members: dict,
     quarters: list[Fold],
     needed: dict[tuple, int],
     log: Callable[[str], None] = print,
+    *,
+    models: tuple[str, ...] = ("pooled", "rates"),
+    discount_grid: tuple = DISCOUNT_GRID,
+    min_levels: dict[str, int] | None = None,
 ) -> Grid:
     """For each rating pair in `needed` and each quarter up to its index there: the pooled and
-    the rates AbilityModel at every DISCOUNT_GRID entry, fitted on the quarter's training rows
-    and predicting its test rows."""
+    (when `models` holds it) the rates AbilityModel at every `discount_grid` entry, fitted on
+    the quarter's training rows and predicting its test rows; the pooled model's entities are
+    `fit_entities(train, min_levels)` (all of ENTITIES by default)."""
     n = len(frame)
     grid = Grid(u={}, se={}, quarters=dict(needed))
     started = time.monotonic()
-    numeric = pd.DataFrame(  # ids as codes (a missing entity id stays missing), so copies are small
-        {col: pd.factorize(frame[col].to_numpy(dtype=object))[0] for col in ("race_id", "horse_id")}
-        | {"finish_pos": frame["finish_pos"].to_numpy(dtype=float)}
-        | {col: _codes(frame[col]) for col in ENTITIES}
-        | {col: frame[col].to_numpy(dtype=float) for col in RATES}
-    )
+    numeric = numeric_frame(frame, RATES if "rates" in models else ())
     for pair, last in needed.items():
         data = numeric.assign(**{RATING: members[pair].to_numpy()})
-        for w in DISCOUNT_GRID:
+        for w in discount_grid:
             grid.u[("pooled", pair, w)] = np.full(n, np.nan)
             grid.se[("pooled", pair, w)] = np.full(n, np.nan, dtype=np.float32)
-            grid.u[("rates", pair, w)] = np.full(n, np.nan)
+            if "rates" in models:
+                grid.u[("rates", pair, w)] = np.full(n, np.nan)
         for qi, quarter in enumerate(quarters[: last + 1]):
             train, test = data.iloc[quarter.train_idx], data.iloc[quarter.test_idx]
-            for w in DISCOUNT_GRID:
-                pooled = AbilityModel(k=3, discounts=w, entity_cols=ENTITIES, features=[RATING])
+            entities = fit_entities(train, min_levels)
+            for w in discount_grid:
+                pooled = AbilityModel(k=3, discounts=w, entity_cols=entities, features=[RATING])
                 out = pooled.fit(train).predict(test)
                 grid.u[("pooled", pair, w)][quarter.test_idx] = out["u"].to_numpy()
                 grid.se[("pooled", pair, w)][quarter.test_idx] = out["se_u"].to_numpy()
+                grid.fits += 1
+                if "rates" not in models:
+                    continue
                 rates = AbilityModel(k=3, discounts=w, features=[RATING, *RATES])
                 grid.u[("rates", pair, w)][quarter.test_idx] = (
                     rates.fit(train).predict(test)["u"].to_numpy()
                 )
-                grid.fits += 2
+                grid.fits += 1
             log(
                 f"  pair {pair} quarter {quarter.test_start} ({qi + 1}/{last + 1}): "
                 f"{_progress(started)}"
@@ -506,19 +530,21 @@ def level1_grid(
     return grid
 
 
-def _inner(race_date: np.ndarray, fold: Fold) -> np.ndarray:
-    """The races of a fold's inner folds: from INNER_FROM to the fold's training end."""
-    return (race_date >= np.datetime64(INNER_FROM)) & (race_date <= np.datetime64(fold.train_end))
+def _inner(race_date: np.ndarray, fold: Fold, inner_from: date = INNER_FROM) -> np.ndarray:
+    """The races of a fold's inner folds: from inner_from to the fold's training end."""
+    return (race_date >= np.datetime64(inner_from)) & (race_date <= np.datetime64(fold.train_end))
 
 
-def select_pairs(frame: pd.DataFrame, members: dict, outer: list[Fold]) -> list[dict]:
+def select_pairs(
+    frame: pd.DataFrame, members: dict, outer: list[Fold], inner_from: date = INNER_FROM
+) -> list[dict]:
     """#91's rule per outer fold: the (drift, scale) whose member alone has the lowest mean
     winner log loss over the fold's inner races (the first grid pair on a tie)."""
     losses = pd.DataFrame({k: _ll(np.exp(m), frame) for k, m in members.items()})
     race_date = frame.groupby("race_id")["race_date"].first().reindex(losses.index).to_numpy()
     out = []
     for fold in outer:
-        mean = losses.loc[_inner(race_date, fold)].mean()
+        mean = losses.loc[_inner(race_date, fold, inner_from)].mean()
         drift, scale = mean.idxmin()
         out.append(
             {"fold": fold.test_start.isoformat(), "drift_var_per_day": drift, "scale": scale}
@@ -528,11 +554,18 @@ def select_pairs(frame: pd.DataFrame, members: dict, outer: list[Fold]) -> list[
 
 
 def select_discounts(
-    frame: pd.DataFrame, grid: Grid, outer: list[Fold], picks: list[dict]
+    frame: pd.DataFrame,
+    grid: Grid,
+    outer: list[Fold],
+    picks: list[dict],
+    *,
+    models: tuple[str, ...] = ("pooled", "rates"),
+    discount_grid: tuple = DISCOUNT_GRID,
+    inner_from: date = INNER_FROM,
 ) -> list[dict]:
-    """Per outer fold (its `select_pairs` row): the pooled and the rates model's discounts with
-    the lowest summed inner-fold winner log loss at the fold's rating pair (ties to the earlier
-    grid entry)."""
+    """Per outer fold (its `select_pairs` row): each of `models`' discounts with the lowest
+    summed inner-fold winner log loss at the fold's rating pair (ties to the earlier grid
+    entry)."""
     codes, labels = race_index(frame)
     won = frame["won"].to_numpy(dtype=float)
     race_date = frame.groupby(codes)["race_date"].first().to_numpy()
@@ -540,21 +573,21 @@ def select_discounts(
     out = []
     for fold, pick in zip(outer, picks, strict=True):
         pair = (pick["drift_var_per_day"], pick["scale"])
-        inner = _inner(race_date, fold)
+        inner = _inner(race_date, fold, inner_from)
         row = dict(pick) | {"inner races": int(inner.sum())}
-        for model in ("pooled", "rates"):
+        for model in models:
             totals = []
-            for w in DISCOUNT_GRID:
+            for w in discount_grid:
                 values = losses[(model, pair, w)][inner]
                 if np.isnan(values).any():
                     raise ValueError(f"an inner race of {row['fold']} has no {model} prediction")
                 totals.append(float(values.sum()))
             best = int(np.argmin(totals))  # the first minimum: ties to the earlier entry
             row |= {
-                f"{model} w2": DISCOUNT_GRID[best][1],
-                f"{model} w3": DISCOUNT_GRID[best][2],
+                f"{model} w2": discount_grid[best][1],
+                f"{model} w3": discount_grid[best][2],
                 f"{model} inner log loss": totals[best] / max(int(inner.sum()), 1),
-                f"{model} winner-only inner log loss": totals[DISCOUNT_GRID.index(WINNER_ONLY)]
+                f"{model} winner-only inner log loss": totals[discount_grid.index(WINNER_ONLY)]
                 / max(int(inner.sum()), 1),
             }
         out.append(row)
@@ -1216,14 +1249,14 @@ def _index_family(line: str) -> str | None:
     return match[1] if match and summary_stem(match[1]) == match[2] else None
 
 
-def write_committed_summary(registry) -> None:
-    """This study's family files, by `write_summary` over this study's families of `registry`,
-    and the committed index with their lines added, ordered by family id: every family the index
-    lists stays (#131's legacy '/' ids, filed as '--', included), and no other family's file is
-    written, so a fresh local registry drops nothing and no other ticket's uncommitted family
-    enters."""
+def write_committed_summary(registry, families=(FAMILY_ID, TRIAL_FAMILY_ID)) -> None:
+    """A study's family files (`families`, this study's by default), by `write_summary` over
+    those families of `registry`, and the committed index with their lines added, ordered by
+    family id: every family the index lists stays (#131's legacy '/' ids, filed as '--',
+    included), and no other family's file is written, so a fresh local registry drops nothing
+    and no other ticket's uncommitted family enters."""
     directory = summary_dir(COUNTRY)
-    mine = _Families(registry, {FAMILY_ID, TRIAL_FAMILY_ID})
+    mine = _Families(registry, set(families))
     if not mine.records():
         return
     with tempfile.TemporaryDirectory() as scratch:

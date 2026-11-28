@@ -1848,12 +1848,27 @@ def test_a_logged_day_shows_the_ladder(tmp_path, monkeypatch):
         m = re.fullmatch(r"≈\s*(\d+\.\d)", got)
         return m is not None and abs(float(m.group(1)) - want) <= 0.051
 
+    def observed_with(got: str, odds: float, earlier: float) -> bool:
+        """`odds (≈earlier)`: the real figure, then the earlier projection (#627)."""
+        m = re.fullmatch(r"(\d+\.\d)\s*\(≈\s*(\d+\.\d)\)", got)
+        return (
+            m is not None
+            and m.group(1) == f"{odds:.1f}"
+            and (abs(float(m.group(2)) - earlier) <= 0.056)  # two roundings: 0.005, then 0.05
+        )
+
     for combo in ("1", "2", "3"):
         t20, t10 = captures[jst(10, 40)][combo], captures[jst(10, 50)][combo]
+        # #627: T-20 shows the projection made from the 10:30 board (post - 30, tau 30) and T-10
+        # the one made from the T-20 capture at 10:40 (tau 20): O * exp(0.02 * (tau - k))
+        from_30 = captures[jst(10, 30)][combo] * math.exp(0.02 * (30 - 20))
+        from_20 = t20 * math.exp(0.02 * (20 - 10))
         # 10:53, tau 7: T-20 and T-10 observed, the T-10 cell coloured by its move since T-20
         cells = shown(late, combo)
-        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
-        assert cells[1][0] == f"{t10:.1f}" and "projected" not in cells[1][1], (combo, cells)
+        assert observed_with(cells[0][0], t20, from_30), (combo, cells)
+        assert "projected" not in cells[0][1], (combo, cells)
+        assert observed_with(cells[1][0], t10, from_20), (combo, cells)
+        assert "projected" not in cells[1][1], (combo, cells)
         assert ("up" if t10 > t20 else "down") in cells[1][1], (combo, cells)
         now_odds = captures[jst(10, 53)][combo]
         for (got, cls), k in zip(cells[2:], (5, 2, 0), strict=True):
@@ -1861,7 +1876,8 @@ def test_a_logged_day_shows_the_ladder(tmp_path, monkeypatch):
             assert near(got, want) and "projected" in cls, (combo, k, got, want)
         # 10:45, tau 15: T-20 observed, the rest projected from the 10:45 odds
         cells = shown(early, combo)
-        assert cells[0][0] == f"{t20:.1f}" and "projected" not in cells[0][1], (combo, cells)
+        assert observed_with(cells[0][0], t20, from_30), (combo, cells)
+        assert "projected" not in cells[0][1], (combo, cells)
         now_odds = captures[jst(10, 45)][combo]
         for (got, cls), k in zip(cells[1:], (10, 5, 2, 0), strict=True):
             want = now_odds * math.exp(0.02 * (15 - k))
@@ -2098,3 +2114,158 @@ def test_the_banner_says_no_stakes():
     assert re.search(r"\bno\s+(real\s+)?(money|amounts?)\b", low), said
     assert re.search(r"\b(not|no|nothing|never|none)\b[^.]{0,80}\bbets?\b", low), said
     assert not stake_words_in(said), said
+
+
+# ---------------------------------------------------------------- the earlier projection (#627)
+
+
+def seen_after(odds, projected, *, keyed=True):
+    """An observed ladder point with the projection made one rung earlier (`projected`, which may
+    be null); `keyed=False` leaves the key out, as a feed from before #627 does."""
+    out = {"odds": odds, "observed": True}
+    if keyed:
+        out["projected"] = projected
+    return out
+
+
+def check_earlier_row(row_el, want: list[dict | None], where) -> int:
+    """The five cells against `want` (the merged points): an observed point shows its odds, and
+    when it has a projection a muted span `(≈x.x)` after it inside the same cell; the cell keeps
+    its up / down class and is not itself `projected`. Returns the number of spans."""
+    spans = 0
+    t20 = want[0]["odds"] if want[0] is not None and want[0]["observed"] else None
+    for i, (col, expected) in enumerate(zip(LADDER_COLS, want, strict=True)):
+        el = cell(row_el, col)
+        shown, cls = text(el), classes(el)
+        inner = el.select(".projected")
+        at = (where, col, shown, cls, expected)
+        if expected is None:
+            assert shown == "-" and not inner, at
+            continue
+        figure_ = f"{expected['odds']:.1f}"
+        if not expected["observed"]:  # a point ahead: as before, the cell itself is the mark
+            assert re.fullmatch(rf"≈\s*{re.escape(figure_)}", shown), at
+            assert "projected" in cls and not inner, at
+            continue
+        assert "projected" not in cls, at
+        earlier = expected.get("projected")
+        if earlier is None:
+            assert shown == figure_ and not inner, at  # the real figure alone
+        else:
+            assert re.fullmatch(rf"{re.escape(figure_)}\s*\(≈\s*{re.escape(f'{earlier:.1f}')}\)",
+                                shown), at  # fmt: skip
+            assert len(inner) == 1 and inner[0].parent is el, at
+            assert re.fullmatch(rf"\(≈\s*{re.escape(f'{earlier:.1f}')}\)", text(inner[0])), at
+            # the figure itself sits outside the muted span
+            assert text(el).replace(text(inner[0]), "").strip() == figure_, at
+            spans += 1
+        if i > 0 and t20 is not None:  # the colour of the observed figure is kept
+            assert ("up" in cls) == (expected["odds"] > t20), at
+            assert ("down" in cls) == (expected["odds"] < t20), at
+        else:
+            assert "up" not in cls and "down" not in cls, at
+    return spans
+
+
+@needs_node
+def test_an_observed_checkpoint_shows_its_earlier_projection_beside_the_real_figure(tmp_path):
+    """`5.8 (≈6.4)`: the observed figure, then the earlier projection muted in parentheses; the
+    real figure alone when the point has no projection (null, or no key). The projection shows
+    on every checkpoint including T-20 and the Final, in every pool with a ladder, and does not
+    replace the plain-feed reference rule: a plain reference that replaces a projected point
+    shows alone."""
+    post = jst(10, 2, 30)
+    table = {
+        "WIN": {
+            "1": (ref_line("1", 2.2, 2.8, 2.5, 2.3, 2.2),
+                  (seen_after(2.8, 2.9), seen_after(2.5, 2.6), seen_after(2.3, 2.4),
+                   seen_after(2.2, 2.1), seen_after(2.0, 2.16))),
+            "2": (ref_line("2", 5.8, 4.6, 4.9, 5.6, 5.9),
+                  (seen_after(4.6, None), seen_after(4.9, 4.4), seen_after(5.6, 5.06),
+                   seen_after(5.9, None), seen_after(6.2, 6.0))),
+            "3": (ref_line("3", 9.3, 9.3, None, None, None),
+                  (seen_after(9.3, 9.0), seen_after(9.3, None, keyed=False), ahead(9.66),
+                   None, None)),
+            "4": (ref_line("4", 31.0, None, 28.7, 33.1, 35.2),  # plain refs replace T-5, T-2
+                  (None, seen_after(28.7, 27.4), ahead(33.8), ahead(36.1), ahead(41.27))),
+        },
+        "PLACE": {
+            "1": (ref_line("1", 1.2, 1.4, 1.3, 1.24, 1.1, hi=1.6),
+                  (seen_after(1.4, None), seen_after(1.3, 1.34), seen_after(1.24, 1.0),
+                   seen_after(1.1, 1.08), seen_after(1.0, 1.0))),
+        },
+        "QUINELLA_PLACE": {
+            "1,2": (ref_line("1,2", 3.3, 3.7, 3.4, 3.2, 3.5, hi=4.1),
+                    (seen_after(3.7, 3.8), seen_after(3.4, 3.6), seen_after(3.2, 3.3),
+                     seen_after(3.5, 3.1), seen_after(3.0, 3.4))),
+        },
+    }  # fmt: skip
+    plain = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "venues": [{
+            "venue": "TOK",
+            "races": [race("TOK", 9, post, NOW, {
+                code: pool(*(r for r, _ in rows.values())) for code, rows in table.items()
+            })],
+        }],
+    }  # fmt: skip
+    values = {"WIN": win(0.9, 0.8, 1.0)}
+    shadow = {
+        "race_date": DAY,
+        "generated_utc": utc_text(NOW),
+        "models": {"nowcast": "now-c3"},
+        "races": [
+            shadow_race("TOK", 9, post, 5, {
+                code: {
+                    combo: {**values.get(code, rng(0.6, 0.8)),
+                            "ladder": dict(zip(LADDER_KEYS, ladder, strict=True))}
+                    for combo, (_, ladder) in rows.items()
+                }
+                for code, rows in table.items()
+            })
+        ],
+    }  # fmt: skip
+    opts = {"now": ms(NOW)}
+    with_shadow, without = (
+        soup(h)
+        for h in results(
+            [call("renderShadow", plain, shadow, opts), call("renderShadow", plain, None, opts)],
+            tmp_path,
+        )
+    )
+    block = race_block(with_shadow, rid("TOK", 9))
+    spans = coloured = 0
+    for code, rows in table.items():
+        for combo, (plain_row, ladder) in rows.items():
+            row_el = row_of(pool_block(block, code), combo)
+            want = merged(plain_row, ladder)
+            spans += check_earlier_row(row_el, want, (code, combo))
+            coloured += sum(
+                1
+                for i, w in enumerate(want)
+                if i > 0
+                and w
+                and w["observed"]
+                and w.get("projected") is not None
+                and want[0] is not None
+                and w["odds"] != want[0]["odds"]
+            )
+    assert spans >= 14 and coloured >= 8, (spans, coloured)
+
+    # the worked cells, as the owner reads them
+    win2 = row_of(pool_block(block, "WIN"), "2")
+    assert re.fullmatch(r"4\.9\s*\(≈\s*4\.4\)", text(cell(win2, "ladder-t10")))
+    assert re.fullmatch(r"6\.2\s*\(≈\s*6\.0\)", text(cell(win2, "ladder-final")))
+    assert text(cell(win2, "ladder-t20")) == "4.6"
+    win4 = row_of(pool_block(block, "WIN"), "4")
+    assert [text(cell(win4, c)) for c in ("ladder-t5", "ladder-t2")] == ["33.1", "35.2"]
+    assert re.fullmatch(r"28\.7\s*\(≈\s*27\.4\)", text(cell(win4, "ladder-t10")))
+
+    # no shadow feed: the plain references alone, no projections anywhere in the ladder cells
+    for code, rows in table.items():
+        for combo in rows:
+            row_el = row_of(pool_block(race_block(without, rid("TOK", 9)), code), combo)
+            for col in LADDER_COLS:
+                assert "≈" not in text(cell(row_el, col)), (code, combo, col)
+                assert not cell(row_el, col).select(".projected"), (code, combo, col)

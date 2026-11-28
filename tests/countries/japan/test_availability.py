@@ -39,7 +39,12 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
     every view at any t, the look-ahead documented in docs/specs/as-of.md); `breeding_horses`,
     `produce` and `lineages` static (known at any t). None has label columns. `horses` stays
     current_value without `in_view`, refused (#80).
-13. exclusions (#405, the owner's answer of 2026-11-28): the JRA-VAN-only JG table (every entry,
+13. The jravan `career_counts` table (#407, JV-Data CK: each runner's, jockey's and trainer's
+    placing counts as of the race's card): offset on race_date, 0 (00:00 JST of the race date, the
+    card's rule; the owner's answer B on #407, 2026-11-28). The other half of answer B, a kept
+    version created after its race date is dropped and counted, is the build's and is pinned in
+    tests/countries/japan/test_jravan_career_counts.py. No label columns.
+14. exclusions (#405, the owner's answer of 2026-11-28): the JRA-VAN-only JG table (every entry,
     with `entry_kind` and `exclusion_kind`), offset on race_date, 0 (00:00 JST of the race date),
     the card's rule; no label columns.
 
@@ -72,7 +77,14 @@ from horsetrack.core.store.asof import (
     read_label,
 )
 from horsetrack.core.store.tables import ARROW_TYPES
-from horsetrack.countries.japan.jravan import bloodlines, exclusions, masters, odds, votes
+from horsetrack.countries.japan.jravan import (
+    bloodlines,
+    career_counts,
+    exclusions,
+    masters,
+    odds,
+    votes,
+)
 from horsetrack.countries.japan.logger.compact import SCHEMA as ODDS_SCHEMA
 
 UTC = timezone.utc
@@ -119,6 +131,8 @@ JRAVAN_SCHEMAS = {
     "breeding_horses": bloodlines.BREEDING_HORSES_SCHEMA,
     "produce": bloodlines.PRODUCE_SCHEMA,
     "lineages": bloodlines.LINEAGES_SCHEMA,
+    # #407: the JV-Data CK placing counts, as of the race's card
+    "career_counts": career_counts.CAREER_COUNTS_SCHEMA,
     "exclusions": exclusions.EXCLUSIONS_SCHEMA,
 }
 
@@ -162,6 +176,10 @@ OWNER: dict[str, dict] = {
     "breeding_horses": {"kind": "static"},
     "produce": {"kind": "static"},
     "lineages": {"kind": "static"},
+    # The CK placing counts (#407): as of the race's card, 00:00 JST of the race date (the owner's
+    # answer B on #407, 2026-11-28; tests/countries/japan/test_jravan_career_counts.py pins the
+    # view over a built table).
+    "career_counts": _offset(0),
     # The JG exclusions (#405): known from 00:00 JST of the race date, the card's rule (the
     # owner's answer on #405, 2026-11-28).
     "exclusions": _offset(0),
@@ -189,7 +207,7 @@ def rules():
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
     assert len(schemas.TABLES) == 14  # 12, + track_condition (#90), + win_sales (#278)
-    assert len(JRAVAN_SCHEMAS) == 8  # + exclusions (#405)
+    assert len(JRAVAN_SCHEMAS) == 9  # 7 (#376), + career_counts (#407), + exclusions (#405)
     assert not set(JRAVAN_SCHEMAS) & set(schemas.TABLES)  # #376 leaves them out of the store
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"} | set(JRAVAN_SCHEMAS)
     assert set(rules) == set(OWNER)
@@ -330,7 +348,7 @@ def test_race_day_rows_open_at_midnight_jst_and_past_runs_the_next_day(rules, co
     # race_date 2026-11-28 is row 2
     jst_midnight = datetime(2026, 11, 27, 15, tzinfo=UTC)
     next_midnight = datetime(2026, 11, 28, 15, tzinfo=UTC)
-    for table in ("meetings", "races", "runners", "jrdb_pre_race", "exclusions"):
+    for table in ("meetings", "races", "runners", "jrdb_pre_race", "career_counts", "exclusions"):
         key = ROW_ID.get(table, "race_id")
         assert f"{key}-2" not in set(read_asof(con, table, jst_midnight - US, rules=rules)[key])
         assert f"{key}-2" in set(read_asof(con, table, jst_midnight, rules=rules)[key])
