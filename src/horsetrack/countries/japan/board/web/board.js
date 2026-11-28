@@ -8,8 +8,11 @@
  * Pool rows run favourite first (#498): by the crowd's current odds (the low end of Place and
  * Wide), ties in combination order, the rows without odds last; the feed itself is not reordered.
  * Feed text is untrusted: every feed string goes through esc() before it reaches the markup.
- * The shadow page (#122) reuses renderBoard with `opts.columns` (extra cells per row) and finds
- * these functions on window.HorseBoard in the browser.
+ * The shadow page (#122) reuses renderBoard with `opts.columns` (extra cells per row) and
+ * `opts.sections` (#506: the pool sections to draw, their rows and a note in each pool head) and
+ * finds these functions on window.HorseBoard in the browser.
+ * This page draws the tier-1 pools only: the feed's tier-2 pools (LATEST_ONLY, the latest capture
+ * of thousands of rows each) are left to the shadow page.
  * The page shows prices and their moves only.
  */
 (function () {
@@ -30,6 +33,7 @@
   ];
   var POOL_LABEL = {}, POOL_RANK = {};
   POOLS.forEach(function (p, i) { POOL_LABEL[p[0]] = p[1]; POOL_RANK[p[0]] = i; });
+  var LATEST_ONLY = { BRACKET_QUINELLA: true, FORECAST: true, TRIO: true, TIERCE: true };
 
   function esc(value) {
     return String(value === null || value === undefined ? "" : value)
@@ -186,20 +190,22 @@
       esc(formatMove(pct)) + "</td>";
   }
 
-  /* columns (optional): {head: extra <th> markup, cells(raceId, code, line): extra <td> markup}. */
-  function renderPool(code, body, raceId, columns) {
-    var rows = (body && body.rows) || [];
+  /* columns (optional): {head: extra <th> markup, cells(raceId, code, line): extra <td> markup}.
+   * rows (optional): the lines to draw, in that order; else the pool's rows, favourite first.
+   * note (optional): extra markup in the pool head. */
+  function renderPool(code, body, raceId, columns, rows, note) {
+    rows = rows || favouriteFirst((body && body.rows) || []);
     var multi = rows.some(function (l) { return String(l.combination).indexOf(",") >= 0; });
     var money = yen(body && body.investment);
     var out = '<section class="pool" data-pool="' + esc(code) + '">' +
       '<div class="pool-head"><h3>' + esc(poolLabel(code)) + "</h3>" +
       '<span class="muted small mono">' + (money ? "Pool " + esc(money) : "Pool money not shown") +
-      "</span></div>" +
+      "</span>" + (note || "") + "</div>" +
       '<table><thead><tr><th scope="col">' + (multi ? "Horses" : "Horse") + "</th>" +
       '<th scope="col" class="num">Odds</th><th scope="col" class="num">Since morning</th>' +
       '<th scope="col" class="num">Since T-20</th>' + (columns ? columns.head : "") +
       "</tr></thead><tbody>";
-    favouriteFirst(rows).forEach(function (line) {
+    rows.forEach(function (line) {
       var scr = line.status === "SCR";
       out += "<tr" + (scr ? ' class="scratched"' : "") + ' data-combination="' +
         esc(line.combination) + '"><th scope="row" class="combo mono">' +
@@ -224,11 +230,20 @@
       '">' + (arrowFirst ? "‹ " + raceLabel(race) : raceLabel(race) + " ›") + "</a>";
   }
 
-  function renderRace(venue, race, nowMs, nextId, columns, prev, next) {
+  /* The sections this page draws: the race's tier-1 pools in pool order, rows favourite first. */
+  function boardSections(race) {
+    return Object.keys(race.pools || {})
+      .filter(function (code) { return !LATEST_ONLY[code]; })
+      .sort(poolOrder)
+      .map(function (code) { return { code: code, body: race.pools[code] }; });
+  }
+
+  /* sections (optional): (race, nowMs) -> [{code, body, rows?, note?}], drawn in that order. */
+  function renderRace(venue, race, nowMs, nextId, columns, prev, next, sections) {
     var postMs = instantMs(race.post_utc);
     var lastMs = instantMs(race.last_capture_utc);
     var stale = isStale(race.last_capture_utc, nowMs);
-    var pools = Object.keys(race.pools || {}).sort(poolOrder);
+    var pools = sections ? sections(race, nowMs) : boardSections(race);
     var cls = "race" + (race.race_id === nextId ? " next" : "") +
       (postMs !== null && postMs <= nowMs ? " off" : "");
     var out = '<article class="' + cls + '" id="' + esc(anchor(race.race_id)) +
@@ -243,8 +258,8 @@
     }
     out += '<span class="chip ' + (stale ? "stale" : "live") + '">' +
       (stale ? "stale · " : "") + esc(captureAge(lastMs, nowMs)) + "</span></p></header>";
-    pools.forEach(function (code) {
-      out += renderPool(code, race.pools[code], race.race_id, columns);
+    pools.forEach(function (s) {
+      out += renderPool(s.code, s.body, race.race_id, columns, s.rows, s.note);
     });
     if (!pools.length) out += '<p class="muted">No odds captured yet.</p>';
     return out + "</article>";
@@ -259,7 +274,8 @@
   }
 
   /* The HTML of the board for one race of one venue of a feed: opts.venue (the feed's first
-   * venue by default) and opts.race when that race is of the venue, else the venue's default. */
+   * venue by default) and opts.race when that race is of the venue, else the venue's default.
+   * opts.columns and opts.sections (both optional) are renderPool's and renderRace's hooks. */
   function renderBoard(feed, opts) {
     opts = opts || {};
     var nowMs = num(opts.now);
@@ -298,7 +314,7 @@
     out += '</nav><div class="races">';
     if (at >= 0) {
       out += renderRace(shown.venue, races[at], nowMs, nextId, opts.columns,
-        races[at - 1] || null, races[at + 1] || null);
+        races[at - 1] || null, races[at + 1] || null, opts.sections);
     }
     if (!races.length) out += '<p class="empty muted">No races captured at this venue yet.</p>';
     return out + "</div>";
@@ -420,7 +436,7 @@
   var api = {
     formatMove: formatMove, moveClass: moveClass, isStale: isStale, renderBoard: renderBoard,
     poll: poll, esc: esc, num: num, selection: selection, chooseVenue: chooseVenue,
-    followSelected: followSelected, toTop: toTop,
+    followSelected: followSelected, toTop: toTop, instantMs: instantMs,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   if (typeof window !== "undefined") window.HorseBoard = api;
