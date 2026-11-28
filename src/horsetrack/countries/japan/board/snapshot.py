@@ -270,6 +270,33 @@ def _card_post_times(path: Path) -> dict[int, datetime]:
     return out
 
 
+def card_post_times(race_date: date, venue: str) -> dict[int, datetime]:
+    """Race number -> post time (aware UTC) from the meeting's stored card alone; empty without
+    one. A race the card leaves without a post time is not listed."""
+    card = _card_path(race_date, venue)
+    return _card_post_times(card) if card.is_file() else {}
+
+
+def card_race_classes(race_date: date, venue: str) -> dict[int, str | None]:
+    """Race number -> `race_class` on the meeting's stored card (None where the card leaves it
+    null); empty without a card or without the column."""
+    import pyarrow.parquet as pq
+
+    card = _card_path(race_date, venue)
+    if not card.is_file():
+        return {}
+    table = pq.read_table(card)
+    if "race_no" not in table.column_names or "race_class" not in table.column_names:
+        return {}
+    return {
+        int(no): None if grade is None else str(grade)
+        for no, grade in zip(
+            table.column("race_no").to_pylist(), table.column("race_class").to_pylist(), strict=True
+        )
+        if no is not None
+    }
+
+
 def jra_day_dir(race_date: date, day_dir: Path | None = None) -> Path:
     """The folder of the day's JRA odds logs: `day_dir` when given (a pulled VM folder, ticket
     #236), else the Mac's own `odds_snapshots/jra/<date>/`."""
@@ -286,8 +313,7 @@ def post_times_for(
     sidecar = odds_log.read_post_times(jra_day_dir(race_date, day_dir) / f"{venue}.races.json")
     if sidecar:
         return sidecar
-    card = _card_path(race_date, venue)
-    return _card_post_times(card) if card.is_file() else {}
+    return card_post_times(race_date, venue)
 
 
 # ---------------------------------------------------------------- decision grid

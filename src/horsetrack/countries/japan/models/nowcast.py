@@ -24,12 +24,21 @@ Shares (per pool, over the combinations priced on a board)
   otherwise from the low figures alone, m_i (P (lo_i / rate - 1) + 1) = 1 - (the P - 1
   largest other m_j), solved in closed form (`stake_back_money`), low figures below the minimum
   dividend read at it. The money sums to 1 when the rule holds, which the study reports as the
-  rule's check (`rule_sum`). Wide (QUINELLA_PLACE) is inverted by the same rule, not yet measured
-  against its money.
+  rule's check (`rule_sum`).
+- Wide pairs are not free co-winners: the pair {a, b} wins with {a, x} and {b, x} for one third
+  runner x, and each winning pair is paid by the same identity
+  (`core.pricing.stake_back_share_gross`, as `stake_back_share_dividend`):
+  (1 - takeout) x (1 + D / (3 m_ab)), D = 1 - m_ab - T_ab the losers' money, the rate covering the
+  returned stake too. Its low figure has T_ab = max over x of (m_ax + m_bx), its high figure the
+  min (`wide_odds`). The inverse (`wide_money`) solves the linear system of a fixed choice of x
+  per pair and iterates the choice to the rule's fixed point. The runners are those the pairs
+  name; `pool_shares(WIDE, ..., combinations=)` needs the pairs. Not yet measured against its
+  money.
 - `late_composition(v1, s1, v2, s2)` = (v2 s2 - v1 s1) / (v2 - v1), the money bet in between.
 
 The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
-- t = post_utc - tau. A row counts from its snapshot_utc (owner, 2026-11-26: no lag); each
+- t = post_utc - tau. A row counts from its fetched_utc, its snapshot_utc where it has none
+  (docs/specs/board-at-t.md; owner, 2026-11-26: no lag), prices and pool totals alike; each
   combination takes its latest row at or before t, and a latest row without a positive price
   leaves the combination off the board. `total` is the latest `__pool__` investment at or before
   t; the lag boards are read the same way at t - 5 and t - 15 minutes, aligned to the board's
@@ -37,6 +46,13 @@ The board at t (`race_view`; rows in `logger.compact.SCHEMA`)
   oldest row on the board to the post: on 5-minute paths the board at t can be minutes old.
 - The final board is each combination's latest row (the store's `is_final_capture`), V_final the
   latest pool total.
+- Each pool is timed by the post time on its own rows (rows of two sources can time one race's
+  pools differently); a pool without one gives no case.
+- A runner scratched in the race's WIN or PLACE rows (status_raw `SCR`, or a `scratches=` row)
+  takes its Wide pairs off the Wide board from the instant the scratch is known on, the final
+  board included: JRA's page stops listing them, so their last prices would otherwise carry to the
+  close. The scratch is known at the reporting row's fetched_utc, its snapshot_utc where it has
+  none, so a capture round that straddles a grid cutoff does not move it before the cutoff.
 
 The model
 - s_final = phi s_t + (1 - phi) s_late, phi = V_t / V_final, and
@@ -81,6 +97,7 @@ Folds and scores
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -99,6 +116,7 @@ from horsetrack.core.eval import distributional
 from horsetrack.core.eval.bootstrap import paired_bootstrap
 from horsetrack.core.eval.folds import FoldScheme, walk_forward
 from horsetrack.core.eval.holdout import is_holdout_day
+from horsetrack.core.pricing import stake_back_share_gross
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.board.snapshot import RaceBoard
 from horsetrack.countries.japan.models.v0.nowcast import HoldoutDayError
@@ -151,6 +169,7 @@ PLACE_RANK_RTOL = 1e-9
 PLACE_QR_SCREEN = 1e-6
 _US_PER_MIN = 60_000_000
 _FAR_FUTURE = np.iinfo(np.int64).max
+_NEVER = _FAR_FUTURE  # a runner never scratched (it stays on the final board too)
 
 
 # ---------------------------------------------------------------- shares
@@ -218,6 +237,103 @@ def stake_back_odds(shares: np.ndarray, places: int, rate: float) -> tuple[np.nd
         lo = rate * (1.0 + (1.0 - m - t_big) / (places * m))
         hi = rate * (1.0 + (1.0 - m - t_small) / (places * m))
     return lo, hi
+
+
+WIDE_WINNERS = 3  # Wide (any two of the first three): the three pairs among the first three win
+_WIDE_ITERATIONS = 100
+
+
+def _pair(text: str) -> tuple[int, int]:
+    key = tuple(sorted(_combination_key(text)))
+    if len(key) != 2 or key[1] >= 1 << 30:
+        raise ValueError(f"not a Wide pair: {text!r}")
+    return key  # type: ignore[return-value]
+
+
+@functools.lru_cache(maxsize=512)
+def _wide_layout(combinations: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    """For each pair {a, b} (rows) and each other runner x of the board (columns), the columns of
+    {a, x} and {b, x}; len(combinations), a column of no money, where the board lists no such
+    pair. The board's runners are those its pairs name, so a scratched runner's unlisted pairs
+    leave it out."""
+    keys = [_pair(c) for c in combinations]
+    column = {k: j for j, k in enumerate(keys)}
+    if len(column) != len(keys):
+        raise ValueError(f"a Wide pair is listed twice: {combinations}")
+    runners = sorted({h for k in keys for h in k})
+    if len(runners) < WIDE_WINNERS:
+        raise ValueError(f"Wide needs {WIDE_WINNERS} runners, got {runners}")
+    none = len(keys)
+    first = np.empty((len(keys), len(runners) - 2), dtype=np.int64)
+    second = np.empty_like(first)
+    for j, (a, b) in enumerate(keys):
+        others = [x for x in runners if x not in (a, b)]
+        first[j] = [column.get((min(a, x), max(a, x)), none) for x in others]
+        second[j] = [column.get((min(b, x), max(b, x)), none) for x in others]
+    return first, second
+
+
+def _co_winners(money: np.ndarray, layout: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    """(rows, pairs, other runners): m_ax + m_bx for each pair {a, b} and third runner x."""
+    first, second = layout
+    padded = np.concatenate([money, np.zeros((len(money), 1))], axis=1)
+    return padded[:, first] + padded[:, second]
+
+
+def wide_odds(
+    shares: np.ndarray, combinations: Sequence[str], payout: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """The low and high figures JRA's Wide rule prints for pair money `shares` (units of the pool;
+    rows of a 2-D input are boards or draws, columns the pairs `combinations`, "a,b"). The pair
+    {a, b} wins with {a, x} and {b, x} for one third runner x, each winning pair paid by the
+    stake-back-share identity (`core.pricing.stake_back_share_gross`): payout x (1 + D / (3 m_ab)),
+    D = 1 - m_ab - (m_ax + m_bx) the losers' money, so the rate covers the returned stake too.
+    Low with max over x of (m_ax + m_bx), high with the min. Not floored, no breakage."""
+    m = np.asarray(shares, dtype=float)
+    flat = np.atleast_2d(m)
+    co = _co_winners(flat, _wide_layout(tuple(combinations)))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lo, hi = (
+            stake_back_share_gross(flat, 1.0 - flat - t, rate=payout, winners=WIDE_WINNERS)
+            for t in (co.max(axis=2), co.min(axis=2))
+        )
+    return lo.reshape(m.shape), hi.reshape(m.shape)
+
+
+def wide_money(lo: np.ndarray, combinations: Sequence[str], payout: float) -> np.ndarray:
+    """Each pair's money in units of the pool from its low figure, the inverse of `wide_odds`:
+    lo / payout - 1 = (1 - m_ab - T_ab) / (3 m_ab), T_ab = max over x of (m_ax + m_bx), so
+    m_ab = c_ab (1 - T_ab) with c = 1 / (3 (lo / payout - 1) + 1). For a fixed choice of the x per
+    pair that is linear in m, m_ab + c_ab (m_ax + m_bx) = c_ab; the choice is iterated (start: the
+    generic stake-back money of the same identity, then the x of the current solution) until it no
+    longer changes, which makes the solution the rule's exact fixed point. Rows of a 2-D `lo` are
+    boards or draws."""
+    lo = np.asarray(lo, dtype=float)
+    flat = np.atleast_2d(lo)
+    layout = _wide_layout(tuple(combinations))
+    n, k = flat.shape
+    out = np.full(flat.shape, np.nan)
+    ok = np.isfinite(flat).all(axis=1)
+    if not ok.any():
+        return out.reshape(lo.shape)
+    gross = flat[ok] / payout  # the figure per unit of the rate: 1 + D / (3 m)
+    c = 1.0 / (WIDE_WINNERS * (gross - 1.0) + 1.0)
+    # PLACE's closed form at rate 1 is the same identity with the P - 1 largest others as T.
+    money = stake_back_money(gross, WIDE_WINNERS, 1.0)
+    rows, pairs = np.arange(len(c))[:, None], np.arange(k)[None, :]
+    chosen = None
+    for _ in range(_WIDE_ITERATIONS):
+        pick = _co_winners(money, layout).argmax(axis=2)
+        if chosen is not None and np.array_equal(pick, chosen):
+            break
+        chosen = pick
+        system = np.zeros((len(c), k, k + 1))
+        system[:, pairs[0], pairs[0]] = 1.0
+        system[rows, pairs, layout[0][pairs, pick]] += c
+        system[rows, pairs, layout[1][pairs, pick]] += c
+        money = np.linalg.solve(system[:, :, :k], c[:, :, None])[:, :, 0]
+    out[ok] = money
+    return out.reshape(lo.shape)
 
 
 def printed_figures(pool: str, figures: np.ndarray | None) -> np.ndarray | None:
@@ -356,17 +472,18 @@ def pool_shares(
     *,
     odds_hi: np.ndarray | None = None,
     starters: int | None = None,
+    combinations: Sequence[str] | None = None,
 ) -> tuple[np.ndarray | None, float]:
     """(shares, rule_sum) of one board's priced combinations (or, for 2-D `odds`, of each row).
     `odds` are the low figures, `odds_hi` the high (PLACE only: a board, or row, with a high
     figure on every combination is read by `place_money_fit`, else by `stake_back_money` from the
     low figures). P is `places_for(starters)` when `starters` (the field at the start of sales)
-    is given, else `places_for` of the priced combinations. `rule_sum` is the money's total in
-    units of the pool (1 when the rule holds), NaN when no rule was used; shares are None when
-    the pool is not sold for this many runners (Wide counts its pairs, which gives its three
-    places from 4 runners, as `places_for` does)."""
+    is given, else `places_for` of the priced combinations. Wide reads its pairs `combinations`
+    (required) by the pair rule (`wide_money`), its runners those the pairs name. `rule_sum` is
+    the money's total in units of the pool (1 when the rule holds), NaN when no rule was used;
+    shares are None when the pool is not sold for this many runners."""
     shares, rule_sum, _ = _read_shares(
-        pool, odds, investment, odds_hi, rank=False, starters=starters
+        pool, odds, investment, odds_hi, rank=False, starters=starters, combinations=combinations
     )
     return shares, rule_sum
 
@@ -392,11 +509,19 @@ def place_shares(
 
 
 def _read_shares(
-    pool: str, odds, investment, odds_hi, *, rank: bool, starters: int | None = None
+    pool: str,
+    odds,
+    investment,
+    odds_hi,
+    *,
+    rank: bool,
+    starters: int | None = None,
+    combinations: Sequence[str] | None = None,
 ) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-    """`pool_shares`, and per row the Place read used (`place_shares`; None off the rule). The
-    fit's rank, which tells `joint` from `undetermined`, is computed only with `rank`; without it
-    a joint fit's rows are labelled `joint`, and the shares are the same either way."""
+    """`pool_shares`, and per row the Place read used (`place_shares`; None off the Place rule,
+    Wide included). The fit's rank, which tells `joint` from `undetermined`, is computed only with
+    `rank`; without it a joint fit's rows are labelled `joint`, and the shares are the same either
+    way."""
     odds = np.asarray(odds, dtype=float)
     if investment is not None:
         money = np.asarray(investment, dtype=float)
@@ -405,10 +530,19 @@ def _read_shares(
     if not _pays_several(pool):
         inverse = 1.0 / odds
         return inverse / inverse.sum(axis=-1, keepdims=True), math.nan, None
+    rate = 1.0 - float(_pool_config(pool).takeout)
+    if pool == WIDE:
+        if combinations is None:
+            raise ValueError("Wide shares need the board's pairs (combinations=)")
+        runners = {h for c in combinations for h in _pair(c)}
+        if _pool_config(pool).places_for(len(runners)) == 0:
+            return None, math.nan, None
+        money = wide_money(np.maximum(odds, _floor(pool)), combinations, rate)
+        total = money.sum(axis=-1, keepdims=True)
+        return money / total, float(total[0]) if odds.ndim == 1 else math.nan, None
     places = _pool_config(pool).places_for(odds.shape[-1] if starters is None else int(starters))
     if places == 0 or odds.shape[-1] < places:
         return None, math.nan, None
-    rate = 1.0 - float(_pool_config(pool).takeout)
     money = stake_back_money(np.maximum(odds, _floor(pool)), places, rate)
     reader = np.full(len(np.atleast_2d(odds)), "low_only", dtype=object)
     if pool == PLACE and odds_hi is not None:
@@ -493,6 +627,8 @@ class _Series:
     inv: np.ndarray
     total_times: np.ndarray
     total_values: np.ndarray
+    # per combination, the first instant one of its runners is scratched (Wide; else None)
+    scratch_from: np.ndarray | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -504,7 +640,12 @@ class _State:
     capture: int  # the oldest row on the board, microseconds
 
 
-def _series(pool: str, rows: pd.DataFrame) -> _Series | None:
+def _series(
+    pool: str, rows: pd.DataFrame, scratched: Mapping[int, int] | None = None
+) -> _Series | None:
+    """`scratched`: runner -> the first instant its scratch is known in the race's WIN or PLACE
+    rows (`_scratches`), applied to Wide: a pair naming that runner is off the board from then
+    on."""
     prices = rows[rows["combination"] != POOL_ROW]
     totals = rows[(rows["combination"] == POOL_ROW) & rows["investment"].notna()]
     totals = totals.sort_values("snap", kind="stable").drop_duplicates("snap", keep="last")
@@ -526,6 +667,12 @@ def _series(pool: str, rows: pd.DataFrame) -> _Series | None:
     present = np.zeros(shape, dtype=bool)
     present[ti, ci] = True
     latest = np.maximum.accumulate(np.where(present, np.arange(len(times))[:, None], -1), axis=0)
+    scratch_from = None
+    if pool == WIDE and scratched:
+        scratch_from = np.array(
+            [min(scratched.get(h, _NEVER) for h in _pair(c)) for c in combinations],
+            dtype=np.int64,
+        )
     return _Series(
         pool,
         combinations,
@@ -536,6 +683,7 @@ def _series(pool: str, rows: pd.DataFrame) -> _Series | None:
         inv,
         totals["snap"].to_numpy(),
         totals["investment"].to_numpy(dtype=float),
+        scratch_from,
     )
 
 
@@ -549,6 +697,8 @@ def _state_at(series: _Series, at: int) -> _State | None:
     safe = np.where(has, rows, 0)
     lo = np.where(has, series.lo[safe, c], np.nan)
     priced = has & np.isfinite(lo) & (lo > 0)
+    if series.scratch_from is not None:  # _NEVER: none of the pair's runners is scratched
+        priced &= (series.scratch_from > at) | (series.scratch_from == _NEVER)
     if not priced.any():
         return None
     index = np.flatnonzero(priced)
@@ -583,10 +733,24 @@ def _starters(series: _Series, state: _State) -> int | None:
     return None if field is None else max(field, len(state.index))
 
 
-def _shares_of(series: _Series, state: _State) -> tuple[np.ndarray | None, float]:
-    return pool_shares(
-        series.pool, state.lo, state.inv, odds_hi=state.hi, starters=_starters(series, state)
+def _read_state(
+    series: _Series, state: _State, *, rank: bool
+) -> tuple[np.ndarray | None, float, np.ndarray | None]:
+    """`_read_shares` of one board of `series`: its pairs for Wide, its field at sale for PLACE."""
+    return _read_shares(
+        series.pool,
+        state.lo,
+        state.inv,
+        state.hi,
+        rank=rank,
+        starters=_starters(series, state),
+        combinations=[series.combinations[i] for i in state.index],
     )
+
+
+def _shares_of(series: _Series, state: _State) -> tuple[np.ndarray | None, float]:
+    shares, rule_sum, _ = _read_state(series, state, rank=False)
+    return shares, rule_sum
 
 
 def _pool_board(series: _Series, post: int, tau_min: float) -> tuple[PoolBoard, float] | None:
@@ -630,9 +794,7 @@ def _final_board(
     state = _state_at(series, _FAR_FUTURE)
     if state is None:
         return None
-    shares, _, reader = _read_shares(
-        series.pool, state.lo, state.inv, state.hi, rank=True, starters=_starters(series, state)
-    )
+    shares, _, reader = _read_state(series, state, rank=True)
     if shares is None:
         return None
     read = str(reader[0]) if series.pool == PLACE and reader is not None else None
@@ -644,9 +806,10 @@ def closing_boards(
 ) -> Iterator[tuple[str, tuple[str, ...], np.ndarray, np.ndarray, int | None]]:
     """(race_id, combinations, low figures, high figures, starters) of the final board of `pool`
     of each race of `frame` with a post time: the board `extract` scores as the final (each
-    combination's latest row, the priced ones kept), before it is read into shares; `starters`
-    is the field at sale its P is read from (PLACE; None for the other pools)."""
-    for race in _races(frame[frame["pool"] == pool], None):
+    combination's latest row, the priced ones kept, a Wide board without the pairs of runners
+    scratched in the WIN or PLACE rows of `frame`), before it is read into shares; `starters` is
+    the field at sale its P is read from (PLACE; None for the other pools)."""
+    for race in _races(frame[frame["pool"] == pool], None, frame):
         series = race.series.get(pool)
         state = None if series is None else _state_at(series, _FAR_FUTURE)
         if state is not None:
@@ -659,10 +822,53 @@ def closing_boards(
             )
 
 
+def _available(rows: pd.DataFrame) -> np.ndarray:
+    """Each row's availability instant (microseconds): its page's fetched_utc, its snapshot_utc
+    where it has none (docs/specs/board-at-t.md), so a capture round that straddles a grid cutoff
+    puts only the pages fetched by the cutoff on that board, prices and totals alike."""
+    known = rows["snapshot_utc"]
+    if "fetched_utc" in rows.columns:
+        known = pd.to_datetime(rows["fetched_utc"], utc=True).fillna(
+            pd.to_datetime(known, utc=True)
+        )
+    return _micros(known)
+
+
 def _prepare(frame: pd.DataFrame) -> pd.DataFrame:
     rows = frame[frame["pool"].isin(POOLS)]
-    rows = rows.assign(snap=_micros(rows["snapshot_utc"]), post=_micros(rows["post_utc"]))
+    rows = rows.assign(snap=_available(rows), post=_micros(rows["post_utc"]))
     return rows[rows["snap"] > np.iinfo(np.int64).min]
+
+
+def _scratches(*frames: pd.DataFrame | None) -> dict[str, dict[int, int]]:
+    """race_id -> runner -> the first instant (microseconds) a WIN or PLACE row of that runner
+    whose status_raw is the scratch marker (`snapshot.SCRATCHED`) is known: its page's
+    fetched_utc, its snapshot_utc where it has none (docs/specs/board-at-t.md), so a round that
+    starts before a grid cutoff and fetches the scratch after it leaves the pairs on that board."""
+    marked = []
+    for frame in frames:
+        if frame is None or "status_raw" not in frame.columns or frame.empty:
+            continue
+        rows = frame[
+            frame["pool"].isin((WIN, PLACE))
+            & (frame["status_raw"] == snapshot.SCRATCHED)
+            & (frame["combination"] != POOL_ROW)
+        ]
+        if len(rows):
+            marked.append(rows.assign(snap=_available(rows))[
+                ["race_id", "combination", "snap"]])  # fmt: skip
+    out: dict[str, dict[int, int]] = {}
+    if not marked:
+        return out
+    rows = pd.concat(marked, ignore_index=True)
+    rows = rows[rows["snap"] > np.iinfo(np.int64).min]
+    first = rows.groupby(["race_id", "combination"], sort=False)["snap"].min()
+    for (race_id, runner), snap in first.items():
+        number = _combination_key(str(runner))
+        if len(number) == 1 and number[0] < 1 << 30:
+            slot = out.setdefault(str(race_id), {})
+            slot[number[0]] = min(slot.get(number[0], _NEVER), int(snap))
+    return out
 
 
 def _race_day(race_id: str) -> str:
@@ -681,30 +887,40 @@ class _Race:
     venue: str
     race_no: int
     grade: str | None
-    post: int
+    posts: dict[str, int]  # per pool: its own rows' post time (each source times its own paths)
     series: dict[str, _Series]
 
 
-def _races(frame: pd.DataFrame, grades: Mapping[str, str | None] | None) -> Iterable[_Race]:
-    """The races of `frame` with a post time, in race-id order."""
+def _races(
+    frame: pd.DataFrame,
+    grades: Mapping[str, str | None] | None,
+    scratches: pd.DataFrame | None = None,
+) -> Iterable[_Race]:
+    """The races of `frame` with a post time, in race-id order; each pool is timed by the first
+    post time on its own rows, and a pool whose rows have none is left out. A runner scratched in
+    the WIN or PLACE rows of `frame` or `scratches` takes its Wide pairs off the board."""
+    scratched = _scratches(frame, scratches)
     rows = _prepare(frame)
+    floor = np.iinfo(np.int64).min
     for race_id, g in rows.groupby("race_id", sort=True):
-        posts = g["post"].to_numpy()
-        posts = posts[posts > np.iinfo(np.int64).min]
-        if not len(posts):
+        if not (g["post"].to_numpy() > floor).any():
             continue
-        series = {}
+        series, posts = {}, {}
         for pool, pg in g.groupby("pool", sort=False):
-            built = _series(str(pool), pg)
+            post = pg["post"].to_numpy()
+            post = post[post > floor]
+            if not len(post):
+                continue
+            built = _series(str(pool), pg, scratched.get(str(race_id)))
             if built is not None:
-                series[str(pool)] = built
+                series[str(pool)], posts[str(pool)] = built, int(post[0])
         yield _Race(
             str(race_id),
             _race_day(str(race_id)),
             str(g["venue"].iloc[0]),
             int(g["race_no"].iloc[0]),
             None if grades is None else grades.get(str(race_id)),
-            int(posts[0]),
+            posts,
             series,
         )
 
@@ -723,7 +939,7 @@ def race_view(
     race = races[0]
     pools = {}
     for pool, series in race.series.items():
-        built = _pool_board(series, race.post, float(tau_min))
+        built = _pool_board(series, race.posts[pool], float(tau_min))
         if built is not None:
             pools[pool] = built[0]
     return RaceView(race.race_id, race.venue, race.race_no, race.grade, float(tau_min), pools)
@@ -915,21 +1131,25 @@ def extract(
     *,
     taus: Sequence[float] | None = None,
     grades: Mapping[str, str | None] | None = None,
+    scratches: pd.DataFrame | None = None,
 ) -> tuple[Cases, Growth, dict]:
     """The cases at every tau (default: the decision grid) and the growth observations of every
     race of `frame`, with counts of what could not be used and of the cases renormalised over the
-    starters after a late scratch (#69)."""
+    starters after a late scratch (#69). `scratches`: more WIN or PLACE rows (compact.SCHEMA)
+    whose scratch markers apply to the Wide boards, though their own prices are not read (the
+    study passes our log's where JRA-VAN supplies the race's WIN and PLACE paths)."""
     taus = _grid() if taus is None else tuple(taus)
     case_rows, runner_rows, obs, finals = [], [], [], []
     counts = {"races": 0, "no_final": 0, "no_board": 0, "added_by_close": 0, "renormalised": 0}
-    for race in _races(frame, grades):
+    for race in _races(frame, grades, scratches):
         counts["races"] += 1
         for pool, series in race.series.items():
+            post = race.posts[pool]
             final = _final_board(series)
             v_final = float(series.total_values[-1]) if len(series.total_values) else math.nan
             if np.isfinite(v_final) and v_final > 0:
                 finals.append((pool, race.day, math.log(v_final)))
-                minutes = (race.post - series.total_times) / _US_PER_MIN
+                minutes = (post - series.total_times) / _US_PER_MIN
                 keep = (minutes >= KNOTS[0]) & (minutes <= KNOTS[-1]) & (series.total_values > 0)
                 for m, v in zip(minutes[keep], series.total_values[keep], strict=True):
                     obs.append(
@@ -942,7 +1162,7 @@ def extract(
             f_combos, f_shares, f_odds, f_reader = final
             f_index = {c: j for j, c in enumerate(f_combos)}
             for tau in taus:
-                built = _pool_board(series, race.post, float(tau))
+                built = _pool_board(series, post, float(tau))
                 if built is None:
                     counts["no_board"] += 1
                     continue
@@ -1646,7 +1866,12 @@ def gain_table(
             row[f"{metric}_candidate"] = float(g[metric].mean())
             row[f"{metric}_baseline"] = float(g[f"{metric}_baseline"].mean())
         rows.append(row)
-    return pd.DataFrame(rows)
+    columns = ["pool", "tau_min", "n_cases", "n_days"] + [
+        name
+        for gain, (metric, _) in GAINS.items()
+        for name in (gain, f"{gain}_lo", f"{gain}_hi", f"{metric}_candidate", f"{metric}_baseline")
+    ]
+    return pd.DataFrame(rows, columns=columns)  # no scored case: no rows, the same columns
 
 
 def compare(
@@ -1675,10 +1900,13 @@ def compare(
 class ShadowNowcast:
     """A Nowcast behind #116's draws interface (`v0.shadow_values.NowcastModel`): odds draws for
     one pool of a `RaceBoard` from shared per-runner shocks. WIN draws keep the board's sum of
-    1/O; PLACE and Wide print the stake-back-share figures of the drawn money, floored at the
-    minimum dividend, from the shares `race_view` reads from the same figures (`pool_shares`
-    with the high figures, #410). A RaceBoard carries no lag boards, so the velocity features are
-    0 here, and a Wide pair's shock is (eps_a + eps_b) / sqrt 2 as in v0."""
+    1/O; PLACE prints the stake-back-share figures of the drawn money and Wide those of JRA's
+    pair rule (`wide_odds`), floored at the minimum dividend, from the shares `race_view` reads
+    from the same figures by the same rules (`pool_shares`, a Place board's high figures included,
+    #410). A RaceBoard carries no lag boards, so the velocity features are 0 here, and a Wide
+    pair's shock is (eps_a + eps_b) / sqrt 2 as in v0. The race's grade is its `race_class` on
+    the meeting's stored card (`snapshot.card_race_classes`), None (the "grade=none" effect)
+    where the card leaves it null or there is no card."""
 
     model: Nowcast
 
@@ -1705,18 +1933,21 @@ class ShadowNowcast:
             odds = np.tile(lo, (n, 1))
             return PoolDraws(pool, combinations, odds, None if hi is None else np.tile(hi, (n, 1)))
         # the board's figures are read as `race_view` reads them, the high figures included
-        shares, _ = pool_shares(pool, lo, odds_hi=hi)
+        shares, _ = pool_shares(pool, lo, odds_hi=hi, combinations=combinations)
         if shares is None:
             raise KeyError(f"{pool} is not sold for {len(lo)} runners")
         minutes = float(tau_min)
         if board.post_utc is not None:
             minutes = (board.post_utc - board.capture_utc).total_seconds() / 60.0
-        _, _, venue, race_no = board.race_id.split(":")
+        _, race_day, venue, race_no = board.race_id.split(":")
+        grade = snapshot.card_race_classes(date.fromisoformat(race_day[:10]), venue).get(
+            int(race_no)
+        )
         view = RaceView(
             board.race_id,
             venue,
             int(race_no),
-            None,
+            grade,
             float(tau_min),
             {pool: PoolBoard(combinations, shares, board.totals.get(pool), None, None, minutes)},
         )
@@ -1729,9 +1960,11 @@ class ShadowNowcast:
         drawn, _ = self.model._draw_shares(view, pool, eps)
         if pool == WIN:
             return PoolDraws(pool, combinations, 1.0 / (drawn * float((1.0 / lo).sum())), None)
-        places = _pool_config(pool).places_for(board.starters)
         rate = 1.0 - float(_pool_config(pool).takeout)
-        low, high = stake_back_odds(drawn, places, rate)
+        if pool == WIDE:
+            low, high = wide_odds(drawn, combinations, rate)
+        else:
+            low, high = stake_back_odds(drawn, _pool_config(pool).places_for(board.starters), rate)
         floor = _floor(pool)
         return PoolDraws(pool, combinations, np.maximum(low, floor), np.maximum(high, floor))
 
