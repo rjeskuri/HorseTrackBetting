@@ -5,7 +5,7 @@ Everything here is offline and synthetic. The member site is a fake behind httpx
 wired in through `Fetcher.__init__` (so a request made any other way meets the socket guard and
 fails); the keychain is a fake `security` behind subprocess.Popen; time is one fake clock; every
 archive is a zip or an lzh-like body of made-up bytes built here. No JRDB byte, record or value is
-in this file.
+in this file, and every account and password in it is made up.
 
 Contract pinned here (the coder follows it). Module `horsetrack.countries.japan.jrdb.fetch`, its
 command registered as `jrdb.command("fetch")` in `horsetrack.cli`.
@@ -59,17 +59,26 @@ Politeness  every request through `horsetrack.core.ingest.fetcher.Fetcher`, with
             (inclusive) to 19:00 (exclusive) Asia/Tokyo on a Saturday or a Sunday, when JRDB closes
             downloads (carried over from HKTrack's downloader and pinned here): a run starting then
             sends nothing.
-Credentials the user id is HORSETRACK_JRDB_USER and the password HORSETRACK_JRDB_PASSWORD, each
-            read with `core.env.get_setting` (process environment, else the repo-root .env); blank
-            is missing. Else the macOS keychain's generic-password item of service `jrdb` (account
-            = the user id): `security find-generic-password -s jrdb` prints its attributes
-            ("acct"), with -w the password on stdout, with -g the password on stderr as
-            `password: "..."`. Call it on any platform; a FileNotFoundError or a non-zero exit
-            means no keychain item. No credential value on any subprocess argv. A missing user id
-            or password: non-zero exit, a message naming both HORSETRACK_JRDB_USER and
-            HORSETRACK_JRDB_PASSWORD, nothing sent. HTTP Basic auth (user:password) goes only to
-            https://jrdb.com, never to another host (a redirect). Neither value appears in the
-            output, the logs, exception text, the manifest, any written file or any argv.
+Credentials (the owner's decision on the ticket, 2026-11-29: the keychain read replaces the
+            outline's password from the environment.) The account is HORSETRACK_JRDB_ACCOUNT, read
+            with `core.env.get_setting` (process environment, else the repo-root .env), stripped;
+            blank is missing. The password comes only from the macOS keychain's generic-password
+            item of service `jrdb` and that account: `/usr/bin/security find-generic-password -s
+            jrdb -a <account> -w`, its stdout with the trailing newline dropped, used verbatim
+            (edge spaces kept); stdout and stderr captured, nothing reaching the run's own output.
+            Call it on any platform. HORSETRACK_JRDB_USER and HORSETRACK_JRDB_PASSWORD are no
+            longer read: in the environment or the .env they hold decoys the site rejects, and
+            even the right password there is no fallback. A keychain item of another service, or
+            of service jrdb under another account, is never used. No account: non-zero exit,
+            nothing sent or written, a message naming HORSETRACK_JRDB_ACCOUNT. An account but no
+            password (no item: `security` exits 44; no `security` tool: FileNotFoundError; a
+            locked keychain: another non-zero exit): non-zero exit, nothing sent or written, a
+            message naming the keychain item of service jrdb and how to add it (`security
+            add-generic-password -s jrdb -a <account> -w`, which prompts). HTTP Basic auth
+            (account:password) goes only to https://jrdb.com, never to another host (a redirect).
+            The password (plain, URL-quoted, base64, in the Basic header) is on no argv and in no
+            output, log, exception text, manifest or written file. The account may be on the
+            `security` argv (it is not a secret) but, being personal data, appears nowhere else.
 Dry run     --dry-run resolves the credentials (missing: as above), prints the files it would
             fetch, each with its URL path, sends no request and writes nothing.
 LaunchAgent --print-launchd prints only a plist (plistlib), with no credential value, and sends and
@@ -100,11 +109,12 @@ import re
 import shlex
 import socket
 import subprocess
+import sys
 import time
 import traceback
 import zipfile
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from pathlib import Path
@@ -126,7 +136,9 @@ FOREIGN_HOST = "mirror.example.net"
 LOOKALIKE_HOST = "jrdb.com.mirror.example.net"
 TOKYO = ZoneInfo("Asia/Tokyo")
 USER_AGENT = "horsetrack-tests/1.0 (jrdb fetch)"
-USER_VAR, PASSWORD_VAR = "HORSETRACK_JRDB_USER", "HORSETRACK_JRDB_PASSWORD"
+ACCOUNT_VAR = "HORSETRACK_JRDB_ACCOUNT"
+# Read before the owner's decision of 2026-11-29 and no longer: they hold decoys in every test.
+OLD_USER_VAR, PASSWORD_VAR = "HORSETRACK_JRDB_USER", "HORSETRACK_JRDB_PASSWORD"
 KEYCHAIN_SERVICE = "jrdb"
 MIN_GAP_S = 2.0
 PRE_RACE_SET = ("KYI", "CYB", "CHA", "KKA", "KAB", "BAC")
@@ -142,36 +154,53 @@ def _b64(text: str) -> str:
 
 @dataclass(frozen=True)
 class Creds:
-    user: str
-    password: str
+    user: str  # the account: personal data, allowed on the `security` argv and nowhere else
+    password: str  # held only by the keychain item of service jrdb and this account
     core: str  # a distinctive part of the password: a cut-down copy is a leak too
 
     @property
     def basic(self) -> str:
         return "Basic " + _b64(f"{self.user}:{self.password}")
 
-    def forms(self) -> list[str]:
-        """The ways the pair can leak: plain, its core, URL-quoted, base64, in a Basic header."""
+    def secrets(self) -> list[str]:
+        """How the password can leak: plain, its core, URL-quoted, base64, in a Basic header."""
         pw = self.password
-        return [self.user, pw, self.core, quote(pw, safe=""), _b64(pw), self.basic[6:]]
+        return [pw, self.core, quote(pw, safe=""), _b64(pw), self.basic[6:]]
+
+    def forms(self) -> list[str]:
+        """Every form of the login, the account too."""
+        return [self.user, *self.secrets()]
 
 
 # Distinctive values, each with a ':' (legal in a Basic password) and a '%' (must not be decoded).
-ENV = Creds("tq-member-0417", "pX9:Wombat-7731%2Fq!", "Wombat-7731")
-DOTENV = Creds("rk-member-2290", "Lq3:Quokka-4410%7Cz?", "Quokka-4410")
-KEYCHAIN = Creds("vb-member-6613", "Zt8:Numbat-9052%3Dk~", "Numbat-9052")
+ENV = Creds("tq-member-0417", "pX9:Wombat-7731%2Fq!", "Wombat-7731")  # account in the environment
+DOTENV = Creds("rk-member-2290", "Lq3:Quokka-4410%7Cz?", "Quokka-4410")  # account in the .env
+SPACED = Creds("sp-member-3388", " Hv4:Bilby-3318%4Ew ", "Bilby-3318")  # edge spaces: verbatim
+KEYCHAIN = Creds("vb-member-6613", "Zt8:Numbat-9052%3Dk~", "Numbat-9052")  # an unconfigured item
 DECOY = Creds("dc-member-5150", "dK2:Echidna-8086%5Ex^", "Echidna-8086")  # must never be used
-ALL_CREDS = (ENV, DOTENV, KEYCHAIN, DECOY)
+ALL_CREDS = (ENV, DOTENV, SPACED, KEYCHAIN, DECOY)
 # Environment variables a careless implementation might read: they hold the decoy.
 DECOY_ENV = {
+    OLD_USER_VAR: DECOY.user,
+    PASSWORD_VAR: DECOY.password,
     "JRDB_USER": DECOY.user,
+    "JRDB_ACCOUNT": DECOY.user,
     "JRDB_PASSWORD": DECOY.password,
     "JRDB_PASS": DECOY.password,
     "HKTRACK_JRDB_ACCOUNT": DECOY.user,
     "HORSETRACK_JRDB_PASS": DECOY.password,
     "HORSETRACK_JRDB_SECRET": DECOY.password,
 }
-DECOY_ITEM = ("jrdb-decoy", DECOY.user, DECOY.password)  # a keychain item of another service
+
+
+def keychain_items(*real: Creds) -> list[tuple[str, str, str]]:
+    """The jrdb items of `real`, behind decoys a careless lookup finds first: an item of another
+    service under each real account (found without `-s jrdb`) and a jrdb item under an account
+    nobody configured (found without `-a <account>`)."""
+    decoys = [("jrdb-decoy", c.user, DECOY.password) for c in real]
+    decoys.append((KEYCHAIN_SERVICE, DECOY.user, DECOY.password))
+    return decoys + [(KEYCHAIN_SERVICE, c.user, c.password) for c in real]
+
 
 FRI_EVE = datetime(2026, 12, 4, 20, 0, tzinfo=TOKYO).astimezone(timezone.utc)  # Fri 20:00 JST
 RACE_DAY = date(2026, 12, 5)  # the Saturday after it
@@ -463,6 +492,11 @@ class FakeProcess:
             return io.StringIO(data) if text else io.BytesIO(data.encode("utf-8"))
 
         merged = kwargs.get("stderr") == subprocess.STDOUT
+        # An inherited stream (None) is the parent's own: what the child writes there is output.
+        if kwargs.get("stdout") is None:
+            sys.stdout.write(out + (err if merged else ""))
+        if kwargs.get("stderr") is None:
+            sys.stderr.write(err)
         self.stdin = None
         self.stdout = pipe(out + (err if merged else ""), kwargs.get("stdout") == subprocess.PIPE)
         self.stderr = pipe(err, kwargs.get("stderr") == subprocess.PIPE)
@@ -500,9 +534,11 @@ class FakeProcess:
 
 class FakeKeychain:
     """Stands in for macOS `security` (subprocess.Popen is replaced; the real keychain is never
-    read). `items` are (service, account, password); a missing -s or -a matches any, as the real
-    tool does. `failure`: "absent" (the tool is not installed) or "locked" (non-zero exit).
-    `argvs` records the argv of every subprocess started during the test."""
+    read). `items` are (service, account, password), the first match wins; a missing -s or -a
+    matches any, as the real tool does, so only `-s jrdb -a <the configured account>` gets past
+    the decoys `keychain_items` puts first. No match: exit 44, as the real tool does. `failure`:
+    "absent" (the tool is not installed) or "locked" (non-zero exit). `argvs` records the argv
+    of every subprocess started during the test."""
 
     def __init__(self) -> None:
         self.items: list[tuple[str, str, str]] = []
@@ -555,7 +591,6 @@ class World:
     keychain: FakeKeychain
     caplog: pytest.LogCaptureFixture
     monkeypatch: pytest.MonkeyPatch
-    extra_forms: list[str] = field(default_factory=list)
 
     @property
     def raw(self) -> Path:
@@ -574,17 +609,16 @@ class World:
     def hits_on(self, path: str) -> list[Hit]:
         return [h for h in self.site.hits if h.host == HOST and h.path == path]
 
-    def set_env(self, user: str | None, password: str | None) -> None:
-        for var, value in ((USER_VAR, user), (PASSWORD_VAR, password)):
+    def set_env(self, settings: dict[str, str | None]) -> None:
+        """Sets each variable in the process environment; None removes it."""
+        for var, value in settings.items():
             if value is None:
                 self.monkeypatch.delenv(var, raising=False)
             else:
                 self.monkeypatch.setenv(var, value)
 
-    def write_dotenv(self, user: str | None, password: str | None) -> None:
-        lines = ["# synthetic .env for a test"]
-        lines += [f"{USER_VAR}={user}"] if user is not None else []
-        lines += [f"{PASSWORD_VAR}={password}"] if password is not None else []
+    def write_dotenv(self, settings: dict[str, str]) -> None:
+        lines = ["# synthetic .env for a test", *(f"{k}={v}" for k, v in settings.items())]
         (self.root / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -610,8 +644,7 @@ def world(
     data = tmp_path / "data"
     monkeypatch.setenv("HORSETRACK_DATA_DIR", str(data))
     monkeypatch.setenv("HORSETRACK_USER_AGENT", USER_AGENT)
-    monkeypatch.setenv(USER_VAR, ENV.user)
-    monkeypatch.setenv(PASSWORD_VAR, ENV.password)
+    monkeypatch.setenv(ACCOUNT_VAR, ENV.user)  # ENV's password is in the keychain, set below
     for name, value in DECOY_ENV.items():
         monkeypatch.setenv(name, value)
 
@@ -631,6 +664,7 @@ def world(
     monkeypatch.setattr(Fetcher, "__init__", offline_init)
 
     keychain = FakeKeychain()
+    keychain.items = keychain_items(ENV)
     monkeypatch.setattr(subprocess, "Popen", keychain.popen(subprocess.Popen))
     shim = tmp_path / "bin"  # belt and braces: a `security` on PATH that never reads a keychain
     shim.mkdir()
@@ -704,8 +738,15 @@ def assert_entries_match_disk(world: World, entries: list[dict[str, Any]]) -> No
 
 
 def assert_no_leak(world: World, *results: Result) -> None:
-    """No credential form in the output, exception text, logs, any subprocess argv or any file
-    written under the test's tmp dir (but the .env and the `security` stub the test wrote)."""
+    """No password form on any subprocess argv (the account may be on the `security` argv: it is
+    not a secret). No form of the login, the account included (personal data), in the output,
+    exception text, logs or any file written under the test's tmp dir (but the .env and the
+    `security` stub the test wrote)."""
+    secrets = [form for creds in ALL_CREDS for form in creds.secrets()]
+    for argv in world.keychain.argvs:
+        joined, name = "\0".join(argv), os.path.basename(argv[0]) if argv else "?"
+        for form in secrets:
+            assert form not in joined, f"a password form ({form[:3]}...) on the argv of {name}"
     places: dict[str, str] = {"logs": world.caplog.text}
     for i, result in enumerate(results):
         places[f"output of run {i}"] = result.output
@@ -713,13 +754,11 @@ def assert_no_leak(world: World, *results: Result) -> None:
         if exc is not None:
             text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             places[f"exception of run {i}"] = text
-    for argv in world.keychain.argvs:
-        places[f"argv of {os.path.basename(argv[0]) if argv else '?'}"] = "\0".join(argv)
     skip = {world.root / ".env", world.tmp / "bin" / "security"}
     for path in sorted(world.tmp.rglob("*")):
         if path.is_file() and path not in skip:
             places[str(path.relative_to(world.tmp))] = path.read_bytes().decode("latin-1")
-    forms = [form for creds in ALL_CREDS for form in creds.forms()] + world.extra_forms
+    forms = [form for creds in ALL_CREDS for form in creds.forms()]
     for form in forms:
         for where, text in places.items():
             assert form not in text, f"a credential value ({form[:3]}...) appears in {where}"
@@ -1126,82 +1165,111 @@ def test_no_request_in_jrdbs_closed_hours(world: World, local: datetime, expecte
 # ---------------------------------------------------------------- DoD 2: credentials
 
 
+STALE = {OLD_USER_VAR: DECOY.user, PASSWORD_VAR: DECOY.password}  # the site rejects them
+NO_STALE_ENV: dict[str, str | None] = dict.fromkeys(STALE)
+
 CREDENTIAL_SOURCES = [
     pytest.param(
-        (ENV.user, ENV.password), (DOTENV.user, DOTENV.password), [KEYCHAIN],
-        (ENV.user, ENV.password), id="the environment first",
+        {ACCOUNT_VAR: ENV.user}, {ACCOUNT_VAR: DOTENV.user, **STALE}, ENV,
+        id="the account from the environment first",
     ),
     pytest.param(
-        (None, None), (DOTENV.user, DOTENV.password), [KEYCHAIN],
-        (DOTENV.user, DOTENV.password), id="then the repo-root .env",
+        {ACCOUNT_VAR: None, **NO_STALE_ENV}, {ACCOUNT_VAR: DOTENV.user, **STALE}, DOTENV,
+        id="then from the repo-root .env, its stale password unused",
     ),
-    pytest.param(
-        (None, None), None, [KEYCHAIN], (KEYCHAIN.user, KEYCHAIN.password), id="then the keychain"
-    ),
-    pytest.param(
-        (ENV.user, None), None, [Creds(ENV.user, KEYCHAIN.password, KEYCHAIN.core)],
-        (ENV.user, KEYCHAIN.password), id="user from the environment, password from the keychain",
-    ),
+    pytest.param({ACCOUNT_VAR: f"  {ENV.user}\t "}, {}, ENV, id="the account stripped"),
+    pytest.param({ACCOUNT_VAR: SPACED.user}, {}, SPACED, id="the keychain password verbatim"),
 ]  # fmt: skip
 
 
-@pytest.mark.parametrize(("env", "dotenv", "items", "expected"), CREDENTIAL_SOURCES)
-def test_credentials_come_from_the_environment_the_env_file_or_the_keychain(
-    world: World,
-    env: tuple[str | None, str | None],
-    dotenv: tuple[str, str] | None,
-    items: list[Creds],
-    expected: tuple[str, str],
+@pytest.mark.parametrize(("env", "dotenv", "expected"), CREDENTIAL_SOURCES)
+def test_the_account_comes_from_its_setting_and_the_password_only_from_the_keychain(
+    world: World, env: dict[str, str | None], dotenv: dict[str, str], expected: Creds
 ) -> None:
-    world.set_env(*env)
-    if dotenv is not None:
-        world.write_dotenv(*dotenv)
-    # A keychain item of another service comes first: a lookup without `-s jrdb` finds it.
-    world.keychain.items = [DECOY_ITEM] + [(KEYCHAIN_SERVICE, c.user, c.password) for c in items]
-    want = Creds(expected[0], expected[1], expected[1][4:12])
-    world.site.expected_auth = want.basic
-    world.extra_forms = want.forms()
+    world.set_env(env)  # the fixture's stale HORSETRACK_JRDB_USER/PASSWORD stay unless removed
+    world.write_dotenv(dotenv)
+    # Every account's jrdb item, behind an item of another service under each account and a jrdb
+    # item under the stale user id: only `-s jrdb -a <the configured account>` finds the right one.
+    world.keychain.items = keychain_items(ENV, DOTENV, SPACED, KEYCHAIN)
+    world.site.expected_auth = expected.basic
     kyi = world.site.publish("KYI", RACE_DAY)
 
     result = world.fetch("--date", RACE_DAY.isoformat(), "--families", "KYI")
 
     assert result.exit_code == 0, result.output
     (hit,) = world.site.hits
-    assert hit.authorization == want.basic
+    assert hit.authorization == expected.basic
     assert (world.raw / kyi.file).read_bytes() == kyi.body
-    assert_no_leak(world, result)  # also: no credential value on the `security` argv
+    assert_no_leak(world, result)  # the password on no `security` argv, the account in no output
 
+
+NO_ACCOUNT, NO_ITEM = "no account", "no keychain item"
 
 MISSING_CREDENTIALS = [
-    pytest.param((None, None), None, None, [], id="nowhere"),
-    pytest.param((None, None), None, "absent", [], id="no security tool"),
-    pytest.param((None, None), None, "locked", [], id="keychain locked"),
-    pytest.param((ENV.user, None), None, None, [], id="user id only"),
-    pytest.param((None, None), (None, DOTENV.password), None, [], id="password only, in .env"),
-    pytest.param(("  ", ""), None, None, [], id="blank values"),
-    pytest.param((None, None), None, None, ["--dry-run"], id="a dry run too"),
-]
+    pytest.param({ACCOUNT_VAR: None}, {}, None, [], NO_ACCOUNT, id="no account anywhere"),
+    pytest.param({ACCOUNT_VAR: " \t "}, {}, None, [], NO_ACCOUNT, id="a blank account"),
+    pytest.param(
+        {ACCOUNT_VAR: None}, {ACCOUNT_VAR: ""}, None, [], NO_ACCOUNT, id="a blank account in .env"
+    ),
+    pytest.param(
+        {ACCOUNT_VAR: None, OLD_USER_VAR: ENV.user}, {}, None, [], NO_ACCOUNT,
+        id="only the old user variable, whose keychain item exists",
+    ),
+    pytest.param(
+        {ACCOUNT_VAR: None}, {}, None, ["--dry-run"], NO_ACCOUNT, id="no account, a dry run"
+    ),
+    pytest.param({}, {}, None, [], NO_ITEM, id="no keychain item for the account"),
+    pytest.param(
+        {PASSWORD_VAR: ENV.password}, {}, None, [], NO_ITEM,
+        id="the right password in the environment is no fallback",
+    ),
+    pytest.param(
+        {PASSWORD_VAR: None}, {PASSWORD_VAR: ENV.password}, None, [], NO_ITEM,
+        id="the right password in .env is no fallback",
+    ),
+    pytest.param({}, {}, "absent", [], NO_ITEM, id="no security tool"),
+    pytest.param({}, {}, "locked", [], NO_ITEM, id="keychain locked"),
+    pytest.param({}, {}, None, ["--dry-run"], NO_ITEM, id="no keychain item, a dry run"),
+]  # fmt: skip
 
 
-@pytest.mark.parametrize(("env", "dotenv", "failure", "extra"), MISSING_CREDENTIALS)
-def test_a_missing_credential_names_both_variables_and_sends_nothing(
+@pytest.mark.parametrize(("env", "dotenv", "failure", "extra", "lacking"), MISSING_CREDENTIALS)
+def test_a_missing_account_or_keychain_item_is_named_and_nothing_is_sent(
     world: World,
-    env: tuple[str | None, str | None],
-    dotenv: tuple[str | None, str | None] | None,
+    env: dict[str, str | None],
+    dotenv: dict[str, str],
     failure: str | None,
     extra: list[str],
+    lacking: str,
 ) -> None:
-    world.set_env(*env)
-    if dotenv is not None:
-        world.write_dotenv(*dotenv)
-    world.keychain.items = [DECOY_ITEM]
+    world.set_env(env)  # on the fixture's HORSETRACK_JRDB_ACCOUNT=ENV.user and stale variables
+    world.write_dotenv(dotenv)
+    # ENV's right password under another service (found without `-s jrdb`), a jrdb item under an
+    # account nobody configured (found without `-a`) and, when the account is what is missing,
+    # ENV's own jrdb item, which a guessed account would reach.
+    world.keychain.items = [
+        ("jrdb-decoy", ENV.user, ENV.password),
+        (KEYCHAIN_SERVICE, KEYCHAIN.user, KEYCHAIN.password),
+    ]
+    if lacking == NO_ACCOUNT:
+        world.keychain.items.append((KEYCHAIN_SERVICE, ENV.user, ENV.password))
     world.keychain.failure = failure
     world.site.publish("KYI", RACE_DAY)
 
     result = world.fetch("--date", RACE_DAY.isoformat(), "--families", "KYI", *extra)
 
     assert result.exit_code != 0, result.output
-    assert USER_VAR in result.output and PASSWORD_VAR in result.output, result.output
+    if lacking == NO_ACCOUNT:
+        assert ACCOUNT_VAR in result.output, result.output
+    else:  # names the item and how to add it (the command prompts for the password)
+        lines = [line for line in result.output.splitlines() if "add-generic-password" in line]
+        assert lines, result.output
+        assert any(
+            re.search(rf"-s\s+['\"]?{KEYCHAIN_SERVICE}\b", line)
+            and re.search(r"\s-a\s", line)
+            and re.search(r"\s-w\b", line)
+            for line in lines
+        ), result.output
     assert world.site.hits == []
     assert files_under(world.data) == set()
     assert_no_leak(world, result)
@@ -1312,7 +1380,6 @@ def test_print_launchd_schedules_the_fetch_then_the_build_at_20_jst(
 ) -> None:
     local_zone(zone)
     expected = datetime.combine(RACE_DAY, dtime(20, 0), TOKYO).astimezone(ZoneInfo(zone))
-    world.keychain.items = [(KEYCHAIN_SERVICE, KEYCHAIN.user, KEYCHAIN.password)]
 
     result = world.fetch("--print-launchd")
 
@@ -1332,7 +1399,7 @@ def test_print_launchd_schedules_the_fetch_then_the_build_at_20_jst(
     assert world.site.hits == []
     assert files_under(world.data) == set()
 
-    world.set_env(None, None)  # no credentials anywhere: the plist still prints
+    world.set_env({ACCOUNT_VAR: None})  # no login anywhere: the plist still prints
     world.keychain.items = []
     bare = world.fetch("--print-launchd")
     assert bare.exit_code == 0, bare.output

@@ -11,7 +11,9 @@ Sunday. A file held (a manifest entry by url_path or file, or the archive on dis
 for again; a 404/410 goes to the manifest's "missing" and is asked for again only after
 MIN_RECHECK or with --retry-missing. Any other refusal or failure stops the run after that one
 request. The manifest (raw/jrdb/manifest.json) is kept as parsed and rewritten atomically after
-each change, every key and entry kept.
+each change, every key and entry kept. The login: the account from HORSETRACK_JRDB_ACCOUNT
+(environment, else the repo-root .env), the password only from the macOS keychain item of
+service jrdb and that account.
 
 Seam, looked up at call time: `_utc_now()`, the aware UTC now.
 """
@@ -48,7 +50,7 @@ from horsetrack.core.ingest.types import FetchTask
 SOURCE = "jrdb"
 ORIGIN = "https://jrdb.com"
 TOKYO = ZoneInfo("Asia/Tokyo")
-USER_VAR, PASSWORD_VAR = "HORSETRACK_JRDB_USER", "HORSETRACK_JRDB_PASSWORD"
+ACCOUNT_VAR = "HORSETRACK_JRDB_ACCOUNT"  # the password: only the keychain item
 KEYCHAIN_SERVICE = "jrdb"
 SECURITY = "/usr/bin/security"  # absolute: no `security` earlier on PATH sees the lookup
 MIN_GAP_S = 2.0
@@ -68,11 +70,15 @@ EXIT_ERROR = 1
 
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _MEMBER = re.compile(r"[A-Za-z0-9_-]+\.txt", re.IGNORECASE)
-_ACCOUNT = re.compile(r'^\s*"acct"<blob>="(.*)"\s*$', re.MULTILINE)
-_NO_CREDENTIALS = (
-    f"no JRDB login: set {USER_VAR} and {PASSWORD_VAR} (environment or the repo-root .env), or "
-    f"add a keychain item of service {KEYCHAIN_SERVICE} with `security add-generic-password "
-    f"-s {KEYCHAIN_SERVICE} -a <user id> -w` (it prompts for the password); nothing sent"
+_NO_ACCOUNT = (
+    f"no JRDB account: set {ACCOUNT_VAR} (environment or the repo-root .env) to the member "
+    "account; nothing sent"
+)
+_NO_PASSWORD = (
+    f"no JRDB password: no readable keychain item of service {KEYCHAIN_SERVICE} for the account "
+    f"in {ACCOUNT_VAR} (no item, no `security` tool, or a locked keychain); add it with "
+    f"`security add-generic-password -s {KEYCHAIN_SERVICE} -a <account> -w` (it prompts for the "
+    "password); nothing sent"
 )
 
 
@@ -147,40 +153,33 @@ def _published(response: httpx.Response) -> str | None:
 # ------------------------------------------------------------------ credentials
 
 
-def _setting(name: str) -> str | None:
-    value = env.get_setting(name)
-    return value if value is not None and value.strip() else None
-
-
-def _security(*args: str) -> str | None:
-    """stdout of `security find-generic-password -s jrdb <args>`, or None (no tool, no item, a
-    locked keychain). Both streams are captured; no credential is ever on the argv."""
-    argv = [SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, *args]
+def _keychain_password(account: str) -> str | None:
+    """The password of the keychain item of service jrdb and `account`, or None (no tool, no item,
+    a locked keychain). Both streams are captured and stdin is closed; only the one trailing
+    newline of `security -w` is dropped. The password is on no argv."""
+    argv = [SECURITY, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"]
     try:
         done = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace",
                               stdin=subprocess.DEVNULL, timeout=120, check=False)  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         return None
-    return done.stdout if done.returncode == 0 else None
+    if done.returncode != 0:
+        return None
+    secret = done.stdout[:-1] if done.stdout.endswith("\n") else done.stdout
+    return secret or None
 
 
 def credentials() -> tuple[str, str]:
-    """(user id, password): each from the environment, else the .env, else the keychain item of
-    service jrdb (whose account must then be the user id). Stop when either is missing."""
-    user, password = _setting(USER_VAR), _setting(PASSWORD_VAR)
-    user = user.strip() if user else None
-    if user is None or password is None:
-        attributes = _security()
-        found = _ACCOUNT.search(attributes) if attributes else None
-        account = found.group(1).strip() if found else ""
-        if attributes is not None and (user is None or not account or account == user):
-            user = user or account or None
-            if password is None and user is not None:
-                secret = _security("-w") or ""
-                password = (secret[:-1] if secret.endswith("\n") else secret) or None
-    if not user or not password:
-        raise Stop(_NO_CREDENTIALS)
-    return user, password
+    """(account, password): the account from HORSETRACK_JRDB_ACCOUNT (environment, else the .env;
+    stripped, blank is missing), the password only from the keychain item of service jrdb and that
+    account. Stop when either is missing; no password is read from a setting."""
+    account = (env.get_setting(ACCOUNT_VAR) or "").strip()
+    if not account:
+        raise Stop(_NO_ACCOUNT)
+    password = _keychain_password(account)
+    if password is None:
+        raise Stop(_NO_PASSWORD)
+    return account, password
 
 
 # ------------------------------------------------------------------ files and the manifest

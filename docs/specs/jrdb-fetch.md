@@ -90,21 +90,27 @@ request, the Fetcher's 2 s spacing aside.
 
 ## Credentials
 
-The user id is `HORSETRACK_JRDB_USER` and the password `HORSETRACK_JRDB_PASSWORD`, each from the
-process environment, else the repo-root `.env` (`core.env.get_setting`); blank is missing. Else
-the macOS keychain: the generic-password item of service `jrdb` (its account must be the user id
-when that is set), added once with
+The owner's decision on #718. The account is `HORSETRACK_JRDB_ACCOUNT`, from the process
+environment, else the repo-root `.env` (`core.env.get_setting`), stripped; blank is missing. The
+password lives only in the macOS keychain, as the generic-password item of service `jrdb` and
+that account, added once with
 
 ```
-security add-generic-password -s jrdb -a <user id> -w
+security add-generic-password -s jrdb -a <account> -w
 ```
 
-which prompts for the password (never on the command line). The fetch runs
-`/usr/bin/security find-generic-password -s jrdb` (the account) and the same with `-w` (the
-password): no credential on any argv, both output streams captured. A missing user id or
-password: exit 1, a message naming both variables, nothing sent. The login goes as HTTP Basic
-auth only to `https://jrdb.com` (`core.ingest.fetcher.OriginAuth`: stripped from any hop to
-another origin) and never appears in output, logs, exception text, the manifest or any file.
+which prompts for the password (never on the command line). The fetch reads it with
+`/usr/bin/security find-generic-password -s jrdb -a <account> -w`: stdin closed, both output
+streams captured, only the one trailing newline dropped and the rest used verbatim. No password
+is read from the environment or the `.env` (`HORSETRACK_JRDB_USER` and
+`HORSETRACK_JRDB_PASSWORD`, read before the decision, are ignored, even when right), and no other
+keychain item is used. No account: exit 1, a message naming `HORSETRACK_JRDB_ACCOUNT`, nothing
+sent. An account but no password (no item, no `security` tool, a locked keychain): exit 1, a
+message naming the keychain item and the command above with a placeholder account, nothing sent.
+The password is on no argv; the account is on the `security` argv only and, being personal data,
+in no output. The login goes as HTTP Basic auth only to `https://jrdb.com`
+(`core.ingest.fetcher.OriginAuth`: stripped from any hop to another origin) and never appears in
+output, logs, exception text, the manifest or any file.
 
 ## The nightly LaunchAgent
 
@@ -129,6 +135,6 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/horsetrack.japan.jrdb-fe
 ```
 
 Print and reinstall it after a change of the Mac's time zone or a daylight-saving change (the
-hour is fixed at print time). With the login in the keychain, allow `security` access to the
-item once ("Always Allow"), or the unattended run finds no password; the login in `.env` avoids
-the prompt. Holdout days are fetched and built like any other; no study reads them (D14).
+hour is fixed at print time). The unattended run needs the login keychain unlocked (the Mac's
+user logged in) and `security` allowed to read the item: if macOS asks on the first run, choose
+"Always Allow", or the run finds no password and stops with the keychain message. Holdout days are fetched and built like any other; no study reads them (D14).
