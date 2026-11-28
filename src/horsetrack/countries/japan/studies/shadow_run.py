@@ -1,6 +1,11 @@
-"""The shadow-calibration study on the logged development days (#101).
+"""The shadow-calibration study on the logged development days (#101; v2, #617).
 
-Pre-registration: docs/specs/shadow-calibration-prereg.md; the frozen spec is ``build_spec()``.
+Pre-registration: docs/specs/shadow-calibration-v2-prereg.md (v1, ``japan-shadow-calibration-v1``:
+docs/specs/shadow-calibration-prereg.md); the frozen spec is ``build_spec()``. v2 names its days
+explicitly (development days from 2026-11-28 on), the nowcast fit its claims used, fitted out of
+sample of those days on JRA-VAN's odds series (so the records and the report name ``jravan``
+beside ``jra``, and the report's figures are licensed-derived, D21), and E20 as explicit (tau,
+lag) pairs, each scored plain and with ln O_t partialled out.
 ``python -m horsetrack.countries.japan.studies.shadow_run --freeze`` freezes it in the japan
 registry (``Registry.freeze_family``; again with the same spec is a no-op), and ``--run`` refuses
 to read a record, a dividend or a board unless the family is frozen with exactly that spec. Every
@@ -15,7 +20,8 @@ options' ranks writes new files beside the old ones, and a file that exists is n
 rerun that reproduces an earlier run keeps that run's report and settlement file as written.
 
 Inputs: the spec's days' v0 shadow logs (``models.shadow.read_shadow``: development days only), the
-jra store's dividends with the scratch refunds (``bets.settle.day_dividends``), each race's final
+jra store's dividends with the scratch refunds (``bets.settle.day_dividends``) of the spec's days
+and of any other development day a read record names, each race's final
 WIN board from the raw odds log (``board.snapshot.final_board``), every bet log on disk
 (``models.shadow.read_bets``) and the leaderboard of the japan registry
 (``core.eval.leaderboard.rows_from_registry``), read after the run's own records are appended.
@@ -42,7 +48,7 @@ import pandas as pd
 from horsetrack.core import paths
 from horsetrack.core.config import load_country_yaml, load_source
 from horsetrack.core.eval.bootstrap import paired_bootstrap
-from horsetrack.core.eval.holdout import _git_sha
+from horsetrack.core.eval.holdout import _git_sha, is_holdout_day
 from horsetrack.core.eval.leaderboard import rank, rows_from_registry, shrink
 from horsetrack.core.eval.registry import (
     FoldMetric,
@@ -59,6 +65,7 @@ from horsetrack.countries.japan.bets.settle import SETTLED, _day_of, day_dividen
 from horsetrack.countries.japan.board import snapshot
 from horsetrack.countries.japan.models.shadow import (
     NotEstimable,
+    _held,
     calibration_slope,
     flat_stakes,
     log_growth_by_day,
@@ -72,15 +79,24 @@ from horsetrack.countries.japan.shadow.log import shadow_log_path
 
 COUNTRY = "japan"
 SOURCE = "jra"
-TICKET = 101
-FAMILY_ID = "japan-shadow-calibration-v1"
+SOURCES = (SOURCE, "jravan")  # the claims' nowcast fit is on JRA-VAN's odds series
+TICKET = 617
+FAMILY_ID = "japan-shadow-calibration-v2"
 FOLD = "development"
 FOLD_SCHEME = "development-days"
-DAYS = ("2026-11-21", "2026-11-22")  # every logged shadow day before the holdout start
+# every development day logged with values from 2026-11-28 on, as of the freeze (2026-11-29 is a
+# holdout day by the committed rule and is never named)
+DAYS = ("2026-11-28",)
 POOL = "WIN"  # the only pool v0 logs a point claim (value_mean) for
 TAUS = (2, 1, 5, 16, 30, 60)  # the shadow grid; T-2 is D2's decision time and the primary
-# E20 lags: 3 pairs T-2 with T-5, 11 pairs T-5 with T-16, 14 pairs T-16 with T-30 and T-2 with T-16
-DRIFT_LAGS = (3, 11, 14)
+# The nowcast fit every claim on the study days names, from its manifest: fitted on the JRA-VAN
+# odds series of 1,353 development days, 2014-06-07 to 2026-11-23, so out of sample of DAYS.
+NOWCAST_FIT = "61413e8a77a6"
+NOWCAST_FITTED_THROUGH = "2026-11-23"
+NOWCAST_MANIFEST = ("models", COUNTRY, "v0", f"manifest-nowcast-{NOWCAST_FIT}.json")
+# E20 as (tau, lag): the fall from T-tau scored from T-(tau + lag). Each adjacent step of the grid,
+# and v1's lag 14 split into its two pairs, T-2 from T-16 and T-16 from T-30.
+DRIFT_PAIRS = ((1, 1), (2, 3), (5, 11), (16, 14), (30, 30), (2, 14))
 PICK_OPTION = "pick-rule-q05-t2"
 BOOTSTRAP_SEED = TICKET
 # the settlement file's columns: a record's key in its log, its decision time, how it settled
@@ -119,11 +135,22 @@ def build_spec() -> dict:
             "P5": "calibration: the realised net return per yen at the final dividend, regressed "
             "(OLS with an intercept) on the claimed net EV per yen of the v0 WIN shadow records, "
             "has slope 1; the claim is value_mean - 1",
-            "E20": "selection drift: the fall ln board_odds(t) - ln final_odds is regressed on "
-            "the claimed EV of the record at t + lag; E20 expects a positive slope (an overlay "
-            "is shortened by the final), the null 0",
+            "E20": "selection drift: for one (tau, lag) pair at a time, the fall ln board_odds(t) "
+            "- ln final_odds of the records at t = tau is regressed on the claimed EV of the "
+            "record at t + lag, plain and with ln board_odds(t) as a covariate; E20 expects a "
+            "positive slope (an overlay is shortened by the final), the null 0",
         },
         "days": list(DAYS),
+        "nowcast": {
+            "fit_id": NOWCAST_FIT,
+            "fitted_through": NOWCAST_FITTED_THROUGH,
+            "fitted_from": "2014-06-07",
+            "trained_on": "processed/jravan/odds_timeseries, 1353 development days (WIN, PLACE)",
+            "manifest": "/".join(NOWCAST_MANIFEST),
+            "out_of_sample": "every study day is after fitted_through",
+            "other_fit_ids": "a claim naming another nowcast fit is scored like the rest and "
+            "counted by fit id in the report (counts.claims_by_nowcast)",
+        },
         "pool": POOL,
         "calibration": {
             "taus": list(TAUS),
@@ -136,19 +163,28 @@ def build_spec() -> dict:
             "tau": TAUS[0],
             "value_q05_above": 1.0,
             "flags": "none on the record",
+            "holdout": "never a pick",
             "rank": "value_q05 descending within a decision time",
             "stake": "flat_stakes with the committed limits",
             "bankroll_yen": limits.day_cap_yen,
             "payout_rate": win_rate,
+            "interval": "return per 100 with the meeting bootstrap; not estimable (no interval) "
+            "on fewer than two meetings",
+            "ruined_day": "a day ending at 0 yen keeps its growth row, log growth -inf written "
+            "null with the reason",
         },
         "leaderboard_options": {
             "k": 0,
-            "why": "no leaderboard row is measured at the freeze, so no option has a rank; a "
-            "ranked option enters through a new family version that names it",
+            "why": "v2 reruns v1's design on new meetings: it scores the v0 shadow claims only. "
+            "Settling another family's ranked option needs that family's rule, so no leaderboard "
+            "option is named; one enters through a family version that names it, and the "
+            "hand-played bets carry each played option's rank",
         },
         "drift": {
-            "lags_min": list(DRIFT_LAGS),
-            "primary_lag_min": DRIFT_LAGS[0],
+            "pairs": [{"tau_min": tau, "lag_min": lag} for tau, lag in DRIFT_PAIRS],
+            "primary": {"tau_min": 2, "lag_min": 3},
+            "partial_log_odds": [False, True],
+            "log_odds": "ln board_odds of the record at t, whose fall is regressed",
             "final_odds": "the WIN figure of board.snapshot.final_board",
         },
         "limits": {"day_cap_yen": limits.day_cap_yen, "flat_stake_yen": limits.flat_stake_yen},
@@ -156,7 +192,7 @@ def build_spec() -> dict:
         "option's development rank; holdout days stay 'holdout'",
         "bootstrap": bootstrap_settings(),
         "adoption": "none: reported, never a gate (owner, 2026-11-27)",
-        "sources": [SOURCE],
+        "sources": list(SOURCES),
     }
 
 
@@ -171,13 +207,16 @@ def _sha16(path: Path) -> str:
 
 
 def _builds(days: Sequence[date]) -> dict[str, str]:
-    """Each input's identity: name@sha16 of the shadow and odds logs, and the jra store build."""
+    """Each input's identity: name@sha16 of the shadow and odds logs, the jra store build and the
+    nowcast fit's manifest ('absent' when that file is not on disk)."""
     builds = {f"shadow_log_{d}": f"{d}.jsonl@{_sha16(shadow_log_path(d))}" for d in days}
     for day in days:
         for log in sorted(snapshot.jra_day_dir(day).glob("*.jsonl.gz")):
             builds[f"odds_log_{day}_{log.name}"] = f"{log.name}@{_sha16(log)}"
     build = json.loads((paths.processed_dir(SOURCE) / "_build.json").read_text(encoding="utf-8"))
     builds["jra_store"] = f"jra@{build['snapshot_id']}"
+    manifest = paths.data_dir().joinpath(*NOWCAST_MANIFEST)
+    builds["nowcast_manifest"] = f"{manifest.name}@{_sha16(manifest)}"
     return builds
 
 
@@ -266,10 +305,12 @@ def _calibration(settled: pd.DataFrame, tau: int, clusters: str, boot: dict) -> 
 
 def _picks(settled: pd.DataFrame, tau: int, floor: float) -> pd.DataFrame:
     """The pick rule's records: WIN at ``tau`` with value_q05 above ``floor`` and no avoid flag,
-    ranked by value_q05 (highest 1) within each decision time."""
+    never a holdout record (labelled, or of a day the committed rule holds), ranked by value_q05
+    (highest 1) within each decision time."""
     rows = settled[(settled["pool"] == POOL) & (settled["tau_min"] == tau)]
     unflagged = rows["flags"].map(lambda f: isinstance(f, list) and not f).astype(bool)
-    picks = rows[(pd.to_numeric(rows["value_q05"]) > floor) & unflagged]
+    held = pd.Series([_held(r) for r in rows.to_dict("records")], index=rows.index, dtype=bool)
+    picks = rows[(pd.to_numeric(rows["value_q05"]) > floor) & unflagged & ~held]
     order = pd.to_numeric(picks["value_q05"]).groupby(picks["decision_utc"])
     return picks.assign(rank=order.rank(ascending=False, method="first"))
 
@@ -299,7 +340,7 @@ def _growth_rows(
         if got is not None and not math.isnan(got["log_growth"]):
             status, money = "settled", {name: got[name] for name in money}
             if math.isinf(got["log_growth"]):
-                reason = "the day ended at 0 yen: ln 0 has no value"
+                reason = "the day ended at 0 yen: log growth -inf (ln 0), null in strict JSON"
             else:
                 value = got["log_growth"]
         elif picks[day]:
@@ -346,21 +387,37 @@ def _pick_rule(settled: pd.DataFrame, spec: dict, limits, boot: dict, out: dict)
         if not len(bets):
             return metrics, f"{len(staked)} pick(s) staked and settled: no return", False
         per_100 = pd.Series(bets["return_per_100"].to_numpy(), index=range(len(bets)))
-        got = paired_bootstrap(per_100, pd.Series(_meetings(bets["race_id"]).to_numpy()), **boot)
+        meetings = pd.Series(_meetings(bets["race_id"]).to_numpy())
+        k = meetings.nunique()
+        metrics.append(_metric("n_clusters[meeting]", k, len(bets)))
+        if k < 2:  # one meeting: a bootstrap of whole meetings has no spread, so no interval
+            metrics.append(_metric("return_per_100", per_100.mean(), len(bets)))
+            return metrics, f"not estimable: {k} meeting, the interval resamples meetings", False
+        got = paired_bootstrap(per_100, meetings, **boot)
         metrics.append(_metric("return_per_100", got.mean, len(bets), got.lo, got.hi))
         return metrics, None, False
 
     return run
 
 
-def _drift(shadow: pd.DataFrame, finals: dict, lag: int, boot: dict) -> Callable:
+def _drift(
+    shadow: pd.DataFrame, finals: dict, tau: int, lag: int, partial: bool, boot: dict
+) -> Callable:
+    """E20 on one (tau, lag) pair: plain, or with ln O_t as a covariate when ``partial``."""
+
     def run() -> Outcome:
         rows = shadow[shadow["pool"] == POOL]
         keys = zip(rows["race_id"], rows["combination"], strict=True)
         frame = rows.assign(final_odds=[finals.get(key, np.nan) for key in keys])
 
         def fit() -> tuple[float, float, float, int, int]:
-            got = selection_drift(frame, lag_minutes=float(lag), **boot)
+            got = selection_drift(
+                frame,
+                lag_minutes=float(lag),
+                tau_minutes=float(tau),
+                partial_log_odds=partial,
+                **boot,
+            )
             return got.slope, got.lo, got.hi, got.n, got.n_clusters
 
         return _slope("drift_slope", "meeting", fit)
@@ -465,7 +522,7 @@ def _write_new(path: Path, text: str) -> bool:
     it was written: an existing report or settlement file is never replaced."""
     if path.exists():
         return False
-    write_report(path, text, sources=(SOURCE,))
+    write_report(path, text, sources=SOURCES)
     return True
 
 
@@ -502,13 +559,34 @@ def _record(v: dict, git_sha: str, builds: dict, components: dict) -> RunRecord:
         ticket=TICKET,
         git_sha=git_sha,
         data_builds=builds,
-        sources=(SOURCE,),
+        sources=SOURCES,
         fold_scheme=FOLD_SCHEME,
         components=components,
         params=v["params"],
         metrics=tuple(v["metrics"]),
         status=v["status"],
     )
+
+
+def _settle_days(days: Sequence[date], shadow: pd.DataFrame) -> list[date]:
+    """The days whose dividends and final boards are read: the spec's days and any other day a
+    read record names (``read_shadow`` reads the spec's days only, so in a run these are the
+    spec's days), never a holdout day."""
+    named = {_day_of(r) for r in shadow["race_id"]} if "race_id" in shadow.columns else set()
+    return sorted(d for d in set(days) | named if not is_holdout_day(COUNTRY, d))
+
+
+def _claims_by_nowcast(settled: pd.DataFrame) -> dict[str, int]:
+    """{nowcast fit id ('none' when a record names none): records with a claim}: the spec scores
+    every claim and reports by this count any that name another fit than its own."""
+    if "models" not in settled.columns:
+        return {}
+    claimed = settled.loc[settled["claimed_ev"].notna(), "models"]
+    ids = Counter(
+        str(m.get("nowcast")) if isinstance(m, dict) and m.get("nowcast") else "none"
+        for m in claimed
+    )
+    return dict(sorted(ids.items()))
 
 
 def run_study(out_dir: Path | None = None) -> dict:
@@ -524,8 +602,9 @@ def run_study(out_dir: Path | None = None) -> dict:
     days = [date.fromisoformat(d) for d in spec["days"]]
     try:
         shadow = read_shadow(days)
-        settled = settle_shadow(shadow, pd.concat([day_dividends(d) for d in days]))
-        finals = final_win_odds(days)
+        named = _settle_days(days, shadow)
+        settled = settle_shadow(shadow, pd.concat([day_dividends(d) for d in named]))
+        finals = final_win_odds(named)
         load_error = None
     except Exception as exc:  # the run is still a record: every variant fails with the reason
         shadow, settled, finals, load_error = None, None, {}, exc
@@ -557,12 +636,17 @@ def run_study(out_dir: Path | None = None) -> dict:
     ]
     plan += [
         (
-            f"drift-win-lag{lag}",
+            f"drift-win-t{pair['tau_min']}-lag{pair['lag_min']}" + ("-partial" if partial else ""),
             "E20",
-            base | {"lag_min": lag},
-            lambda lag=lag: _drift(shadow, finals, lag, boot),
+            base
+            | {"tau_min": pair["tau_min"], "lag_min": pair["lag_min"]}
+            | {"partial_log_odds": partial},
+            lambda pair=pair, partial=partial: _drift(
+                shadow, finals, pair["tau_min"], pair["lag_min"], partial, boot
+            ),
         )
-        for lag in spec["drift"]["lags_min"]
+        for pair in spec["drift"]["pairs"]
+        for partial in spec["drift"]["partial_log_odds"]
     ]
     plan.append(("hand-played-bets", "P5", {}, lambda: _bets(limits, out, played)))
 
@@ -575,7 +659,9 @@ def run_study(out_dir: Path | None = None) -> dict:
     ]
     git_sha = _git_sha()
     builds = _builds(days)
-    models = set() if shadow is None else set(shadow["models"].dropna().map(json.dumps))
+    models = set()
+    if shadow is not None and "models" in shadow.columns:
+        models = set(shadow["models"].dropna().map(json.dumps))
     components = {"shadow_models": "; ".join(sorted(models)) or "none"}
     existing = registry.records(FAMILY_ID)
     records = [_record(v, git_sha, builds, components) for v in variants]
@@ -600,11 +686,15 @@ def run_study(out_dir: Path | None = None) -> dict:
         counts |= {
             "records": len(shadow),
             "with_claim": int(settled["claimed_ev"].notna().sum()),
-            "outcomes": {
+            "outcomes": {  # reindexed: a frame without a pool column has no outcome to count
                 f"{pool} {outcome}": int(n)
-                for (pool, outcome), n in settled.groupby(["pool", "outcome"]).size().items()
+                for (pool, outcome), n in settled.reindex(columns=["pool", "outcome"])
+                .groupby(["pool", "outcome"])
+                .size()
+                .items()
             },
             "races_with_final_win_board": len({race for race, _ in finals}),
+            "claims_by_nowcast": _claims_by_nowcast(settled),
         }
     lines = None if settled is None else _settlement(settled)
     shape = None
