@@ -21,6 +21,14 @@ A single-winner pool pays rate x V / W per yen. Our stake s goes into both, so a
 - Place and Wide, re-registered (family `japan-pool-depth-coplacer-v2`): the rule of `core.pricing.stake_back_share_dividend` pays r(1 + B / (P W_i)) per yen, B = V - sum W the losers' money. Our stake adds to V and to sum W alike, so B stays and the capacity is s = (1 - c)(B + P W_i) / (P(c - 1) + c B / W_i), whatever r is; at P = 1 it is the single-winner identity again. The same gate applies.
 - The exacta (#350): 100 yen on one combination moves its dividend by (V + s) / V x W / (W + s) - 1, with W the combination's final money.
 
+## Trifecta and bracket quinella (#490)
+
+Family `japan-pool-depth-exotics-v1` (config/pool_depth_exotics.yaml, frozen before its run; docs/specs/pool-depth-prereg.md, "Exotics"): the depth variant for TIERCE (the trifecta) and BRACKET_QUINELLA alone, with the cells, definitions, edges, quantiles and flat stakes above. Both are single-winner pools, so every combination has the capacity stake of the identity above. The quantiles are exact and streamed: per cell, each distinct (V, W) pair is kept once with its count, and a quantile is read from the cumulative counts by numpy's linear rule, so memory follows the distinct pairs rather than the trifecta's combinations; the store is read a year at a time. A bracket pair's horses are the starters the jravan runners put in its two brackets (枠番; a scratched horse, 取消 or 除外, is in no bracket); a pair is sold when both brackets hold a starter, a same-bracket pair when its bracket holds two or more, and a pair not sold gives no row even where the board prices it. Figures: withheld (D21).
+
+- Combinations, by counting: 18 starters give 18 x 17 x 16 = 4,896 trifecta combinations against 816 for the trio; the bracket quinella has at most 36 pairs (28 of two brackets and 8 of one).
+- An invented nine-horse field by JRA's draw: brackets 1 to 7 hold horses 1 to 7 and bracket 8 holds 8 and 9. The pair 7-8 names horses 7, 8 and 9 (it pays on 7-8 or 7-9 in the first two), 8-8 names 8 and 9, and 1-1 is not sold.
+- An invented cell of three combinations, W = 100, 100 and 300 yen: the count map holds (100, 2) and (300, 1), and the median is the second of three, 100 yen.
+
 ## Variants tried
 
 - `depth` at `f21e0aa`: scored, registry run `6573127e490b925a6a73d3e61fb306029643773691312459e705c53555980669`, private report `pool-depth-japan-1545d788a9ac.md`; every figure withheld (D21).
@@ -34,11 +42,13 @@ A single-winner pool pays rate x V / W per yen. Our stake s goes into both, so a
 - `co-placer` at `3de5687`: failed, registry run `420c46b4106171f09368a82ac8dd0e24c0bfef3992c0763512f0a26389bd92f8`, private report `pool-depth-coplacer-japan-420c46b4106171f0.md`; every figure withheld (D21).
 - `exacta-own-impact` at `3de5687`: scored, registry run `77f70ef00b49e5c3c6a7c9e5b71c4410121d421265246ad3198f7867a6ea9050`, private report `exacta-impact-history-japan-77f70ef00b49e5c3.md`; every figure withheld (D21).
 - `co-placer` (family `japan-pool-depth-coplacer-v2`, spec sha256 `82a471b219bfee2e65f53c5c12e2f66514757169d82184b6be45b35b2454e89a`) at `3de5687`: scored, registry run `aaeaaccd5dc4f9cfed503d5ba7d0167ddef5d9f87e3f401400941e5ac2f1d371`, private report `pool-depth-coplacer-japan-aaeaaccd5dc4f9cf.md`; every figure withheld (D21).
+- `depth` (family `japan-pool-depth-exotics-v1`, spec sha256 `531658f78e2513daaa4a5fd61cee9924dec3eb529afcd343216ec71d56a0ec8c`) at `5af150b`: scored, registry run `7363def84fd94c5482d56a1a404bb43ea6956ffdbba2461b5eff931ed22537ec`, private report `pool-depth-exotics-japan-7363def84fd94c54.md`; every figure withheld (D21).
 
 ## Alternatives rejected and why
 
-- TIERCE and BRACKET_QUINELLA: not in the cells. The trifecta has several times the trio's combinations, too many for exact quantiles in memory on this machine; the bracket quinella needs the horse-to-bracket map.
-- Quantile sketches: rejected for exact quantiles over the six pools.
+- TIERCE and BRACKET_QUINELLA: not in `japan-pool-depth-v1`'s cells. The trifecta has several times the trio's combinations, too many for exact quantiles held in memory on this machine; the bracket quinella needs the horse-to-bracket map. Both are measured by the exotics family (#490), with a streaming exact quantile and the runners' bracket map.
+- Quantile sketches: rejected for exact quantiles over the six pools, and for the streaming count map of distinct values over TIERCE and BRACKET_QUINELLA.
+- The pool-size tertile cells and the totals at t for TIERCE and BRACKET_QUINELLA: not registered by the exotics family; the totals at t are of the time series' pools only.
 - Capacity with breakage and the 110-yen floor: rejected; breakage makes the stake a step function of the price, and the continuous stake is the stated quantity.
 - The gross pool for V: rejected; refunded votes do not pay.
 - The co-placer rule frozen in `japan-pool-depth-v1`, 1 + (rV - sum W) / (P W_i): rejected by its own rule check (its runs are recorded failed and kept); it leaves the paying combinations' own money untaxed, while JRA takes the payout rate on the whole net pool. The rule of `core.pricing.stake_back_share_dividend`, the stake-back-share rule as `config/jra.yaml` states it, was v1's diagnostic and is `japan-pool-depth-coplacer-v2`'s registered rule (withheld (D21)).
@@ -52,7 +62,7 @@ Which cells the flat stake fits, and so where betting big is possible: withheld 
 Filed as proposed tickets:
 
 - #489, the co-placer re-registration: done here by family `japan-pool-depth-coplacer-v2`, whose co-placer run is scored; the ticket can close.
-- #490: the trifecta (TIERCE) and bracket-quinella depth, with a streaming quantile.
+- #490, the trifecta (TIERCE) and bracket-quinella depth with a streaming quantile: family `japan-pool-depth-exotics-v1`, its runs listed above.
 - #491: the capacity beside each leaderboard row.
 
 Publishable figures need the logged public days (#130).
