@@ -20,11 +20,17 @@ logged and never touches tier 1 (a CircuitOpen still ends the day: the host bloc
 
 Race cards (ticket #426, logger.yaml `cards`, JRA only): each race's 出馬表 once per grid point of
 `cards.grid_min`, stretches as tier 2's (the day-before window's rounds included), a venue's due
-races in one `capture_cards` call written with `write_cards`. They spend only what is left of a
-round's budget after tier 1, the results polls and tier 2, so the odds captures are the same with
-the block as without. A grid point is tried once; a failed card capture is logged and is no
-venue's failure (a CircuitOpen still ends the day). A site without `capture_cards` or a store
-without `write_cards` (one from before #426): no cards.
+races in one `capture_cards` call written with `write_cards`. They stay within a round's budget
+and come after tier 1's hot races, the results polls and tier 2, but before tier 1's spare
+full-cycle refreshes of races that are not hot (fix round 1: at 1 req/s on a three-venue day the
+cards got almost nothing otherwise). Before tier 1 runs, the round works out what its due card
+points cost in what the hot races, the results polls and tier 2 (planned as without the cards)
+leave, and leaves out the refreshes tier 1 picked last until they fit. The planning state moves as
+for the whole plan, so a refresh left out waits for the venue's next cycle and every later round,
+tier 2 included, plans as without the cards; while the budget does not bind nothing changes. A
+grid point is tried once; a failed card capture is logged and is no venue's failure (a CircuitOpen
+still ends the day). A site without `capture_cards` or a store without `write_cards` (one from
+before #426): no cards.
 
 Results (ticket #225, logger.yaml `results`, JRA only): each venue with post times polls the
 site's `published_results` from its first post to its last post + until_min, at most every
@@ -268,18 +274,22 @@ def plan_round(
     return _plan(now, venues, config, rps)[0]
 
 
+Refresh = tuple[str, int]  # (venue, race): a full-cycle capture of a race that is not hot
+
+
 def _plan(
     now: datetime,
     venues: list[VenueState],
     config: Mapping[str, Any],
     rps: float,
     every: float | None = None,
-) -> tuple[list[Job], int]:
-    """plan_round's jobs, and how many race captures were due at the venues it could capture.
-    `every`: the round's every_s (None: the window in force at `now`)."""
+) -> tuple[list[Job], int, list[Refresh]]:
+    """plan_round's jobs, how many race captures were due at the venues it could capture, and the
+    full-cycle races picked that are not hot, in the order picked. `every`: the round's every_s
+    (None: the window in force at `now`)."""
     every = _every_s(now, config) if every is None else every
     if every is None:
-        return [], 0
+        return [], 0, []
     budget = every * rps
     nav, per = config["requests"]["navigation"], config["requests"]["per_race"]
     floor = timedelta(seconds=config["min_poll_interval_s"])
@@ -314,7 +324,7 @@ def _plan(
             spent += cost
     if hot and not picked:  # the budget is below one hot race: that race alone
         *_, i, n = hot[0]
-        return [Job(eligible[i].code, [n], nav + per)], wanted
+        return [Job(eligible[i].code, [n], nav + per)], wanted, []
 
     def urgency(item: tuple[int, VenueState]) -> tuple:
         # most overdue first: never cycled, then by when the cycle started or fell due
@@ -327,6 +337,8 @@ def _plan(
             at = v.cycle_start + timedelta(seconds=config["hot_races"]["all_every_s"])
         return (at is not None, at or now, v.code not in picked, i)
 
+    hot_set = {(eligible[i].code, n) for *_, i, n in hot}
+    refreshes: list[Refresh] = []
     for _, v in sorted(enumerate(eligible), key=urgency):
         races = due[v.code]
         if races is None:  # races unknown: every race in one capture, if it fits
@@ -344,6 +356,8 @@ def _plan(
                 break
             picked.setdefault(v.code, []).append(n)
             spent += cost
+            if (v.code, n) not in hot_set:
+                refreshes.append((v.code, n))
 
     jobs = [
         Job(code, None, nav + per * RACES_IF_UNKNOWN)
@@ -351,7 +365,13 @@ def _plan(
         else Job(code, sorted(races), nav + per * len(races))
         for code, races in picked.items()
     ]
-    return jobs, wanted
+    return jobs, wanted, refreshes
+
+
+def _pick_cost(picked: Mapping[str, list[Any]], requests: Mapping[str, Any]) -> float:
+    """The cost of grid captures picked: navigation + per_race x points, per venue."""
+    nav, per = requests["navigation"], requests["per_race"]
+    return float(sum(nav + per * len(points) for points in picked.values()))
 
 
 # ---------------------------------------------------------------- the block marker
@@ -683,21 +703,27 @@ class _Day:
                     self._read(v, start)
             active = self._active(self.now())
             jobs: list[Job] = []
+            sends: dict[str, list[int]] = {}
+            given = 0.0  # the planned cost of the refreshes left out for the cards
             if active:
                 rps, every = self.site.requests_per_second, self._every(start)
-                jobs, wanted = _plan(start, [v.state for v in active], schedule, rps, every)
+                states = [v.state for v in active]
+                jobs, wanted, refreshes = _plan(start, states, schedule, rps, every)
+                if self.cards:
+                    sends, given = self._give_way(start, jobs, refreshes, schedule)
                 self.summary.deferred += wanted - sum(
-                    1 if j.races is None else len(j.races) for j in jobs
+                    1 if j.races is None else len(sends.get(j.venue, j.races)) for j in jobs
                 )
                 for job in jobs:
                     v = self.venues[job.venue]
                     if self._running(v, self.now()):
-                        self._capture(v, job, start, schedule)
+                        self._capture(v, job, start, schedule, sends.get(job.venue))
+            # tier 2 sees tier 1's whole plan: its share is the same with the cards as without
             spent = sum(job.requests for job in jobs) + self._results_round()
             if self.tier2 and active:
                 spent += self._tier2_round(start, spent)
             if self.cards and active:
-                self._cards_round(start, spent)
+                self._cards_round(start, spent, given)
             # while odds are logged, results polls ride on the rounds; after, they set the pace
             wake = self._next_round(start) if self._active(self.now()) else self._results_wake()
             if wake is None:
@@ -719,25 +745,39 @@ class _Day:
             self.store.write_post_times(v.state.code, merged)
             self._count_tier2(v)
 
-    def _capture(self, v: _Venue, job: Job, start: datetime, schedule: Mapping[str, Any]) -> None:
-        if v.started_at is not None:  # the floor between real capture starts
+    def _capture(
+        self,
+        v: _Venue,
+        job: Job,
+        start: datetime,
+        schedule: Mapping[str, Any],
+        send: list[int] | None = None,
+    ) -> None:
+        """Run `job`. `send`: the job's races left once the cards took some of its refreshes
+        (None: all of them; []: no site call); the planning state moves as for the whole job."""
+        races = job.races if send is None else send
+        if races != [] and v.started_at is not None:  # the floor between real capture starts
             wait = self.config["min_poll_interval_s"] - _secs(self.now() - v.started_at)
             if wait > 0:
                 self.sleep(wait)
         due = _cycle_due(v.state, start, schedule)
         v.state.last_capture = start
-        t0 = v.started_at = self.now()
-        try:
-            capture = self.site.capture(v.state.code, job.races)
-        except _CALL_ERRORS as exc:
-            self._failed(v, exc, t0, "capture")
-            return
-        t1 = self.now()
-        v.summary.rows += self.store.write(v.state.code, capture)
-        v.summary.snapshots += 1
-        self.summary.requests += capture.requests
-        v.wrong_in_row = 0
-        v.state.races_seen = tuple(sorted(set(v.state.races_seen) | _race_numbers(capture.rows)))
+        if races == []:  # every race of the job gave way to the cards
+            t0 = t1 = self.now()
+        else:
+            t0 = v.started_at = self.now()
+            try:
+                capture = self.site.capture(v.state.code, races)
+            except _CALL_ERRORS as exc:
+                self._failed(v, exc, t0, "capture")
+                return
+            t1 = self.now()
+            v.summary.rows += self.store.write(v.state.code, capture)
+            v.summary.snapshots += 1
+            self.summary.requests += capture.requests
+            v.wrong_in_row = 0
+            seen = set(v.state.races_seen) | _race_numbers(capture.rows)
+            v.state.races_seen = tuple(sorted(seen))
         if due == []:  # hot races only: no cycle was due
             return
         if not _cycle_left(v.state):  # this capture starts a cycle
@@ -773,6 +813,11 @@ class _Day:
         t = self.now()
         dues = [d[0] for v in self.venues.values() if (d := self._results_due(v, t)) is not None]
         return min(dues, default=None)
+
+    def _results_cost(self, t: datetime) -> int:
+        """What the results polls due at `t` cost."""
+        due = [self._results_due(v, t) for v in self.venues.values()]
+        return _RESULTS_REQUESTS * sum(1 for d in due if d is not None and d[0] <= t <= d[1])
 
     def _results_round(self) -> int:
         """Poll every venue whose results poll is due; the requests the polls cost."""
@@ -838,11 +883,32 @@ class _Day:
         """The points of `grid` due at `start` and not `tried`, in what is left of the round's
         budget after `spent`, a venue's in one `capture(v, points)`; a capture that would run past
         the next round's start is left for later. Returns the planned cost of the captures run."""
+        picked = self._grid_pick(start, spent, grid, tried, requests)
+        nav, per = requests["navigation"], requests["per_race"]
+        rps = self.site.requests_per_second
+        deadline = self._next_round(start)
+        sent = 0.0
+        for code, points in picked.items():
+            v, cost = self.venues[code], nav + per * len(points)
+            if v.state.stopped is None and self.now() + timedelta(seconds=cost / rps) <= deadline:
+                capture(v, points)
+                sent += cost
+        return sent
+
+    def _grid_pick(
+        self,
+        start: datetime,
+        spent: float,
+        grid: Sequence[int],
+        tried: Mapping[str, set[tuple[int, int]]],
+        requests: Mapping[str, Any],
+    ) -> dict[str, list[tuple[int, int]]]:
+        """_grid_round's picking: each venue's points that fit in what `spent` leaves of the
+        round's budget, by due time (the stretch ending soonest first)."""
         every = self._every(start)
         if every is None:
-            return 0.0
-        rps = self.site.requests_per_second
-        left = every * rps - spent
+            return {}
+        left = every * self.site.requests_per_second - spent
         nav, per = requests["navigation"], requests["per_race"]
         due = []
         for v in self.venues.values():
@@ -858,14 +924,7 @@ class _Day:
             if cost <= left + _EPS:
                 picked.setdefault(code, []).append((race, g))
                 left -= cost
-        deadline = self._next_round(start)
-        sent = 0.0
-        for code, points in picked.items():
-            v, cost = self.venues[code], nav + per * len(points)
-            if v.state.stopped is None and self.now() + timedelta(seconds=cost / rps) <= deadline:
-                capture(v, points)
-                sent += cost
-        return sent
+        return picked
 
     def _capture_tier2(self, v: _Venue, points: list[tuple[int, int]]) -> None:
         v.tier2_tried.update(points)
@@ -884,13 +943,65 @@ class _Day:
 
     # ------------------------------------------------ race cards (ticket #426)
 
-    def _cards_round(self, start: datetime, spent: float) -> None:
+    def _cards_round(self, start: datetime, spent: float, given: float) -> None:
         """The card grid points due at `start`, in what the odds left of the round's budget
-        (`spent`: tier 1's, the results polls' and tier 2's)."""
+        (`spent`: tier 1's whole plan, the results polls' and tier 2's; nothing when the results
+        polls took it past the budget) and the refreshes left out for them (`given`)."""
+        every = self._every(start)
+        if every is None:
+            return
+        budget = every * self.site.requests_per_second
         tried = {code: v.cards_tried for code, v in self.venues.items()}
         self._grid_round(
-            start, spent, self.card_grid, tried, self.cards["requests"], self._capture_cards
+            start,
+            min(spent, budget) - given,
+            self.card_grid,
+            tried,
+            self.cards["requests"],
+            self._capture_cards,
         )
+
+    def _give_way(
+        self, start: datetime, jobs: list[Job], refreshes: list[Refresh], schedule: Mapping
+    ) -> tuple[dict[str, list[int]], float]:
+        """The refreshes tier 1 leaves out so the card points due at `start` fit: what those cost
+        in the round's budget after the hot races, the results polls and tier 2 (planned as
+        without the cards), then the refreshes picked last left out first until the cards fit.
+        Returns each cut job's races still to send, and the planned cost left out."""
+        every = self._every(start)
+        if every is None or not refreshes:
+            return {}, 0.0
+        nav, per = schedule["requests"]["navigation"], schedule["requests"]["per_race"]
+        planned = float(sum(j.requests for j in jobs))
+        others = float(self._results_cost(start))
+        if self.tier2:
+            req = self.tier2["requests"]
+            tried = {code: v.tier2_tried for code, v in self.venues.items()}
+            others += _pick_cost(
+                self._grid_pick(start, planned + others, self.grid, tried, req), req
+            )
+        keep = {j.venue: list(j.races) for j in jobs if j.races is not None}
+        drops: list[tuple[str, list[int], float]] = []  # last picked first: (venue, kept, freed)
+        for code, n in reversed(refreshes):
+            keep[code] = [m for m in keep[code] if m != n]
+            drops.append((code, keep[code], per + (nav if not keep[code] else 0)))
+        # as _cards_round: nothing of the budget left once the results polls took it past
+        budget = every * self.site.requests_per_second
+        free = max(budget - planned - others, 0.0)
+        req = self.cards["requests"]
+        tried = {code: v.cards_tried for code, v in self.venues.items()}
+        all_out = sum(freed for *_, freed in drops)
+        cards = _pick_cost(
+            self._grid_pick(start, budget - free - all_out, self.card_grid, tried, req), req
+        )
+        sends: dict[str, list[int]] = {}
+        given = 0.0
+        for code, kept, freed in drops:
+            if free + given >= cards - _EPS:
+                break
+            sends[code] = kept
+            given += freed
+        return sends, given
 
     def _capture_cards(self, v: _Venue, points: list[tuple[int, int]]) -> None:
         v.cards_tried.update(points)

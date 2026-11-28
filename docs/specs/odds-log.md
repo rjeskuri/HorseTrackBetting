@@ -123,8 +123,11 @@ has a `results` block.
 
 Path: `<VENUE>.cards.jsonl.gz` beside the log, one per meeting, written by `log-day` (JRA only)
 when logger.yaml has a `cards` block: each race's 出馬表 (JRADB pw01dde) once per grid point of
-`cards.grid_min` (minutes before post, stretched as tier 2's), from what the odds leave of each
-round's budget (`logger/schedule.py`).
+`cards.grid_min` (minutes before post, stretched as tier 2's), within each round's budget
+(`logger/schedule.py`): after tier 1's hot races, the results polls and tier 2, before tier 1's
+spare full-cycle refreshes of races that are not hot. A refresh left out for the cards waits for
+the venue's next full cycle or for the race to turn hot; the hot-race captures, the tier-2
+captures and the results polls are the same with the cards as without.
 
 - Append-only, in the log's format: one gzip member per capture (`odds_log.append_capture`), read
   back with `iter_members`. A later capture never rewrites an earlier one, so every capture of a

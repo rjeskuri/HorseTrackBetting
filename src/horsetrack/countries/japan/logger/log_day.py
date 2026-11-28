@@ -523,7 +523,8 @@ def _plan(run: _SourceRun) -> list[str]:
     cards = config.get("cards")
     cards_line = (
         [f"race cards: each race's card at T-{',T-'.join(map(str, cards['grid_min']))} min,"
-         " from what the odds leave of each round"] if cards else []
+         " after the hot races, results and tier 2, before spare full-cycle refreshes"]
+        if cards else []
     )  # fmt: skip
     results = config.get("results")
     results_line = (
