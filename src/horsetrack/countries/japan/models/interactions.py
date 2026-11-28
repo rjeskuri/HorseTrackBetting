@@ -28,7 +28,23 @@ of every block with at most DENSE_MAX parameters are solved jointly by Newton's 
 aptitude on the full store) is "local": its levels take block-Jacobi Newton steps (each level's
 own curvature, cross-level terms within a race dropped), alternating with the joint step until no
 step exceeds MAP_TOL, so the MAP itself is exact; only its posterior variances (the fixed point's
-trace and the evidence's log-determinant) use the block-diagonal approximation. A low-rank
+trace and the evidence's log-determinant) are approximate. With a local term they are those of
+the information with every runner's own curvature h only (the coupling between the runners of a
+race dropped, as in the local steps), where the local levels stay coupled to the dense block:
+the dense parameters' covariance is the inverse of their Schur complement, A - B C^-1 B', and a
+local level's variance adds the dense block's uncertainty carried through its column of B (so a
+horse's level and the horse's own cells, which are confounded, share their variance as in the
+dense fit, not each take all of it). Local terms on the same key (the same row entity: a horse's
+structured and low-rank blocks) are fused into one block per level (K = the sum of their K), so
+their mutual coupling is kept and the direction they share with the dense block leaves A once;
+C is block-diagonal over the levels, and with every local term on one key the Schur complement
+is positive definite. Sparse: only B's few entries per level are used. What stays approximate:
+the dropped within-race coupling makes a variance a few percent small against the dense fit (1
+to 4% on the test fixtures, the trainer entity that the horses' stable confounds up to 9%; more
+where a prior sd is near its floor), and local terms on different keys are not coupled to each
+other (each is, to the dense block), which can bias their variances and, where they share a
+direction, make the Schur complement indefinite (the empirical-Bayes loop then fails to
+converge). A fit with no local term uses the exact information. A low-rank
 block's W takes its own Newton step given U (the objective is concave in W after the rescaling
 that keeps W at unit scale), then U W is renormalised. Every step is halved until the penalised
 objective does not worsen.
@@ -95,6 +111,7 @@ TAU_ZERO = 1e-5  # the prior sd at which a block counts as removed (tau = 0)
 PROFILE_BISECTIONS = 7  # per bound: tau to 1/128 of the point below it, to 1.1% above
 PROFILE_GROWTH = 4.0  # the upper search's factor per step
 PROFILE_DOUBLINGS = 8
+QUAD_CHUNK = 2_000_000  # entries of the dense work matrix when a local term's variances are formed
 OUT_COLUMNS = ["race_id", "horse_id", "u", "p_ability"]
 
 __all__ = [
@@ -371,6 +388,27 @@ def _unit(w: np.ndarray) -> np.ndarray:
     return w / norm_w
 
 
+def _columns(term: _Term, codes: np.ndarray, cov: np.ndarray) -> sp.csr_matrix:
+    """The term's design columns, k-major (column k * m + level): rows x (m * K), sparse."""
+    ok = np.flatnonzero(codes >= 0)
+    rows = np.tile(ok, term.K)
+    cols = np.concatenate([k * term.m + codes[ok] for k in range(term.K)])
+    data = np.concatenate([cov[ok, k] for k in range(term.K)])
+    return sp.csr_matrix((data, (rows, cols)), shape=(len(codes), term.m * term.K))
+
+
+def _quad_diag(G: sp.spmatrix, inv: np.ndarray) -> np.ndarray:
+    """diag(G' inv G) for a sparse G (P x c) and a dense P x P inv, in column chunks so that no
+    P x c dense matrix is formed."""
+    G = G.tocsc()
+    out = np.empty(G.shape[1])
+    step = max(1, QUAD_CHUNK // max(1, G.shape[0]))
+    for a in range(0, G.shape[1], step):
+        part = G[:, a : a + step].T.tocsr()
+        out[a : a + step] = np.asarray(part.multiply(part @ inv).sum(axis=1)).ravel()
+    return out
+
+
 def _centred_basis(m: int) -> np.ndarray:
     """An orthonormal basis of the vectors in R^m that sum to 0 (m x (m - 1))."""
     q, _ = np.linalg.qr(np.column_stack([np.ones(m), np.eye(m)[:, : m - 1]]))
@@ -459,13 +497,8 @@ class _Model:
         n = X.shape[0]
         blocks = [sp.csr_matrix(X.reshape(n, len(self.features)))]
         for term, codes, cov in parts:
-            if term.local:
-                continue
-            ok = np.flatnonzero(codes >= 0)
-            rows = np.tile(ok, term.K)
-            cols = np.concatenate([k * term.m + codes[ok] for k in range(term.K)])
-            data = np.concatenate([cov[ok, k] for k in range(term.K)])
-            blocks.append(sp.csr_matrix((data, (rows, cols)), shape=(n, term.m * term.K)))
+            if not term.local:
+                blocks.append(_columns(term, codes, cov))
         return sp.hstack(blocks, format="csr")
 
     def _idx(self, g: int) -> np.ndarray:
@@ -806,35 +839,90 @@ class _Model:
 
     # -- empirical Bayes and the evidence -----------------------------------------------------
 
+    def _coupled(self, z: np.ndarray, *, trace: bool):
+        """The posterior of a fit with local terms: the dense parameters' variances (diagonal of
+        the inverse of their Schur complement), each local term's (m x K) variances and the
+        log-determinant, all of the information with each runner's own curvature h only (the
+        within-race coupling between runners dropped, as in the local steps) and the local levels
+        coupled to the dense block: [[A, B], [B', C]], A and B from the same h. Local terms on
+        the same key (the same row entity, as a horse's structured and low-rank blocks) are fused
+        into one block per level (K = the sum of their K), so their mutual coupling is kept and
+        the direction they share with the dense block is taken out of A once: C is block-diagonal
+        over the levels and the Schur complement A - B C^-1 B' is positive definite. Local terms
+        on different keys stay separate blocks, their mutual coupling dropped (the Schur
+        complement is then not guaranteed positive definite). Sparse: the Schur complement and,
+        per local level, B C^-1's column (a few entries) against its inverse."""
+        _, _, h = self._scores(self.u())
+        prec = self._precision(z)
+        Dh = sp.diags(h) @ self._D if self.P else None
+        schur = (self._D.T @ Dh).toarray() + np.diag(prec) if self.P else np.zeros((0, 0))
+        fused: dict[tuple[str, ...], list[int]] = {}
+        for t, term in enumerate(self.terms):
+            if term.local:
+                fused.setdefault(term.key_cols, []).append(t)
+        logdet, parts = 0.0, []
+        for members in fused.values():
+            # one pseudo-term over the members' columns side by side, on their shared levels
+            term = dataclasses.replace(
+                self.terms[members[0]], X=np.hstack([self.terms[t].X for t in members])
+            )
+            prec_k = np.exp(-z[[g for t in members for g in self.terms[t].groups]])
+            H = self._local_curvature(term, h, prec_k)
+            logdet += float(np.linalg.slogdet(H)[1].sum())
+            inv = np.linalg.inv(H)  # m x K x K
+            levels = np.arange(term.m)
+            rows = np.concatenate(
+                [a * term.m + levels for a in range(term.K) for _ in range(term.K)]
+            )
+            cols = np.concatenate(
+                [b * term.m + levels for _ in range(term.K) for b in range(term.K)]
+            )
+            data = np.concatenate([inv[:, a, b] for a in range(term.K) for b in range(term.K)])
+            size = term.m * term.K
+            G = None
+            if self.P:  # B C^-1, P x (m K)
+                B = Dh.T @ _columns(term, term.codes, term.X)
+                G = B @ sp.csr_matrix((data, (rows, cols)), shape=(size, size))
+                schur -= (G @ B.T).toarray()
+            parts.append((members, term, inv, G))
+        diag, local_var = None, {}
+        if self.P:
+            if trace:
+                inverse = _inverse(schur)
+                diag = np.diag(inverse)
+            else:
+                chol, _ = scipy.linalg.cho_factor(schur, check_finite=False)
+                logdet += 2.0 * float(np.log(np.abs(np.diag(chol))).sum())
+        if trace:
+            for members, term, inv, G in parts:
+                eye = np.arange(term.K)
+                var = inv[:, eye, eye]
+                if G is not None:  # + G' S^-1 G, G = B C^-1 (column k * m + level)
+                    var = var + _quad_diag(G, inverse).reshape(term.K, term.m).T
+                at = 0
+                for t in members:  # split back to the member terms' columns
+                    local_var[t] = var[:, at : at + self.terms[t].K]
+                    at += self.terms[t].K
+        return diag, local_var, logdet
+
     def _posterior(self, z: np.ndarray, *, trace: bool):
         """Per group: its levels, the trace of its posterior covariance (with `trace`, else 0)
         and |theta|^2; the log-likelihood; and, without `trace`, the log-determinant of the
-        penalised information (block-diagonal over the local terms' levels)."""
+        penalised information (see `_coupled` for a fit with local terms)."""
         prec = self._precision(z)
         if self._at is None:
             self._at = self._evaluate()
         loglik, _, info = self._at
         logdet, diag, local_var = 0.0, None, {}
-        if self.P:
+        if self.has_local:
+            diag, local_var, logdet = self._coupled(z, trace=trace)
+        elif self.P:
             matrix = info + np.diag(prec)
             if trace:
                 diag = np.diag(_inverse(matrix))
             else:
                 chol, _ = scipy.linalg.cho_factor(matrix, check_finite=False)
                 logdet += 2.0 * float(np.log(np.abs(np.diag(chol))).sum())
-        if self.has_local:
-            _, _, h = self._scores(self.u())
-            for t, term in enumerate(self.terms):
-                if not term.local:
-                    continue
-                H = self._local_curvature(term, h, np.exp(-z[term.groups]))
-                if trace:
-                    eye = np.arange(term.K)
-                    local_var[t] = (
-                        1.0 / H[:, :, 0] if term.K == 1 else np.linalg.inv(H)[:, eye, eye]
-                    )
-                else:
-                    logdet += float(np.linalg.slogdet(H)[1].sum())
         out = []
         for g, group in enumerate(self.groups):
             term, values = self.terms[group.term], self._values(g)

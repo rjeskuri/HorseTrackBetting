@@ -305,6 +305,72 @@ def alias_frame(seed: int, *, trainer_change: bool, jockey_constant: bool = Fals
 
 
 # ---------------------------------------------------------------------------------------------
+# Horse x jockey cells (the block-Jacobi path) and trainer x venue cells with few runs (a weakly
+# identified variance), #570
+# ---------------------------------------------------------------------------------------------
+
+HJ_HORSES = 30
+HJ_JOCKEYS = 6
+
+
+def horse_jockey_frame(
+    seed: int, tau: float, races: int, *, level_sd: float = 0.0, horses: int = HJ_HORSES
+) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, jockey_id, finish_pos, x1: races of 6 to 8 distinct horses of
+    `horses` (30 by default), each with one of 6 jockeys drawn per run. u = X_COEF * x1 + a
+    planted N(0, tau^2) effect for each of the horses x 6 horse x jockey cells + (with
+    level_sd > 0) a planted N(0, level_sd^2) level for each horse; no jockey main effect. So the
+    cell block's tau, and the horse entity's sd, are the ones planted. A horse level next to its
+    own horse x jockey cells is the shape of #92's ability model with horse_id among its
+    entities, which is what the horse-level blocks take at store scale."""
+    rng = np.random.default_rng(seed)
+    codes = field(rng, races, sizes=(6, 8))
+    n = len(codes)
+    horse = np.concatenate([rng.choice(horses, size=s, replace=False) for s in np.bincount(codes)])
+    jockey = rng.integers(0, HJ_JOCKEYS, size=n)
+    cells = rng.normal(0.0, tau, size=(horses, HJ_JOCKEYS))
+    level = rng.normal(0.0, level_sd, size=horses) if level_sd > 0 else np.zeros(horses)
+    x1 = rng.normal(size=n)
+    pos = pl_positions(rng, X_COEF * x1 + level[horse] + cells[horse, jockey], codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:03d}" for i in horse], dtype=object),
+            "jockey_id": np.array([f"j:{i}" for i in jockey], dtype=object),
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+        }
+    )
+
+
+def few_run_cells_frame(seed: int, tau: float, races: int) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, trainer_id, venue, finish_pos, x1: races of 6 to 8 runners of
+    12 trainers at 4 venues, a planted N(0, tau^2) effect on each of the 48 trainer x venue
+    cells and no trainer main effect. With a few dozen races a cell has about 10 runs or fewer,
+    so the cell variance (and the trainer's) is weakly identified."""
+    rng = np.random.default_rng(seed)
+    codes = field(rng, races, sizes=(6, 8))
+    n = len(codes)
+    venue = rng.integers(0, len(VENUES), size=races)[codes]
+    trainer = rng.integers(0, TT_TRAINERS, size=n)
+    cells = rng.normal(0.0, tau, size=(TT_TRAINERS, len(VENUES)))
+    x1 = rng.normal(size=n)
+    pos = pl_positions(rng, X_COEF * x1 + cells[trainer, venue], codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:06d}" for i in range(n)], dtype=object),
+            "trainer_id": np.array([f"t:{i:02d}" for i in trainer], dtype=object),
+            "venue": np.array(VENUES, dtype=object)[venue],
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------------------------
 # Trainer sequences for the transfer step
 # ---------------------------------------------------------------------------------------------
 
@@ -327,3 +393,79 @@ def sequence_frame(sequences: dict[str, str], seed: int) -> tuple[pd.DataFrame, 
     labelled = zip(frame.index, frame["key"], frame["run"], strict=True)
     where = {(key, run): label for label, key, run in labelled}
     return frame.drop(columns=["key", "run"]), where
+
+
+# ---------------------------------------------------------------------------------------------
+# The horse_aptitude member's shape: two horse-level blocks over dense jockey and trainer
+# entities, horses that keep their trainer, east/west stabling, #570
+# ---------------------------------------------------------------------------------------------
+
+HA_HORSES = 60
+HA_TRAINERS = 6
+HA_JOCKEYS = 10
+HA_RACES = 1000
+HA_CROSSOVER = 0.25  # the weight of a horse's off-region runs against its home-region runs
+HA_TRAINER_KEPT = 0.9  # a horse's runs for its home trainer (horse % 6)
+
+
+def horse_aptitude_frame(seed: int, races: int = HA_RACES) -> pd.DataFrame:
+    """race_id, race_utc, horse_id, jockey_id, trainer_id, finish_pos, x1, venue, distance_m,
+    surface: `races` races of 8 of 60 horses, each at one of 4 venues (tokyo and nakayama east,
+    kyoto and hanshin west). A horse is stabled east or west (half each) and its trainer, one of
+    6 (3 east, 3 west), is its home trainer (horse % 6) in 90% of its runs; a horse is drawn for
+    a race with weight 1 in its own region's venues and 0.25 in the other region's (a 20 to 30%
+    crossover). Planted: x1, a jockey and a trainer main effect, a horse level (sd 0.3, the
+    structured block's a_h), a per-horse distance slope (sd 0.3) and a per-horse east/west
+    effect (sd 0.2, rank one). The two horse-level blocks of the real member then confound the
+    trainer entity (the trainer is nearly the horse's stable) and each other (both carry the
+    horse's level)."""
+    rng = np.random.default_rng(seed)
+    runners = 8
+    codes = np.repeat(np.arange(races), runners)
+    venue_idx = rng.integers(0, len(VENUES), size=races)
+    east_venue = np.array([VENUE_SIGN[v] > 0 for v in VENUES])[venue_idx]
+    stable_east = (np.arange(HA_HORSES) % HA_TRAINERS) < HA_TRAINERS // 2
+    horse = np.empty(races * runners, dtype=np.int64)
+    for r in range(races):
+        weight = np.where(stable_east == east_venue[r], 1.0, HA_CROSSOVER)
+        horse[r * runners : (r + 1) * runners] = rng.choice(
+            HA_HORSES, runners, replace=False, p=weight / weight.sum()
+        )
+    home = horse % HA_TRAINERS
+    kept = rng.random(len(horse)) < HA_TRAINER_KEPT
+    trainer = np.where(kept, home, rng.integers(0, HA_TRAINERS, size=len(horse)))
+    jockey = rng.integers(0, HA_JOCKEYS, size=len(horse))
+    venue = venue_idx[codes]
+    distance = rng.choice(DISTANCES, size=races)[codes]
+    surface = rng.choice(np.array(["turf", "dirt"], dtype=object), size=races)[codes]
+    sign = np.array([VENUE_SIGN[v] for v in VENUES], dtype=float)[venue]
+    level = rng.normal(0.0, 0.3, size=HA_HORSES)
+    slope = rng.normal(0.0, 0.3, size=HA_HORSES)
+    ew = rng.normal(0.0, 0.2, size=HA_HORSES)
+    t_main = centred(rng.normal(0.0, 0.3, size=HA_TRAINERS))
+    j_main = centred(rng.normal(0.0, 0.2, size=HA_JOCKEYS))
+    x1 = rng.normal(size=len(codes))
+    z = (distance - 2000.0) / 700.0
+    u = (
+        X_COEF * x1
+        + t_main[trainer]
+        + j_main[jockey]
+        + level[horse]
+        + slope[horse] * z
+        + ew[horse] * sign
+    )
+    pos = pl_positions(rng, u, codes)
+    return pd.DataFrame(
+        {
+            "race_id": labels(codes, prefix="jra:k"),
+            "race_utc": race_times(codes),
+            "horse_id": np.array([f"h:{i:02d}" for i in horse], dtype=object),
+            "jockey_id": np.array([f"j:{i:02d}" for i in jockey], dtype=object),
+            "trainer_id": np.array([f"t:{i}" for i in trainer], dtype=object),
+            "finish_pos": pos.astype(np.int64),
+            "x1": x1,
+            "venue": np.array(VENUES, dtype=object)[venue],
+            "distance_m": distance.astype(np.int64),
+            "surface": surface,
+        }
+    )
