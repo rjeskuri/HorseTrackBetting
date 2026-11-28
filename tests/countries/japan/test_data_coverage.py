@@ -15,10 +15,10 @@ The inputs, `src/horsetrack/countries/japan/config/model_inputs.yaml`:
 - In the committed yaml a supply's source is `jra` or `jravan`, and its table and column exist:
   in `schemas.TABLES`, in `compact.SCHEMA` (table `odds_timeseries`) or in a jravan-only schema
   (`final_odds`, `pool_votes`, `jockeys`, `trainers`, `breeding_horses`, `produce`, `lineages`,
-  `mining_predictions`, `career_counts`; source `jravan` only). A jravan supply on a
-  `schemas.TABLES` table names one the jravan builders write. Every filter key is a column of the
-  table. A dumped family is the table `records/<DATASPEC>/<RT>` (source `jravan`, a family outside
-  `dump.MAPPED`; its column is not checked, a dump is counted only).
+  `mining_predictions`, `career_counts`, `exclusions`; source `jravan` only). A jravan supply on
+  a `schemas.TABLES` table names one the jravan builders write. Every filter key is a column of
+  the table. A dumped family is the table `records/<DATASPEC>/<RT>` (source `jravan`, a family
+  outside `dump.MAPPED`; its column is not checked, a dump is counted only).
 
 How `coverage(inputs) -> Coverage` reads a supply:
 - `odds_timeseries`: the day files `processed/<source>/odds_timeseries/<YYYY-MM-DD>.parquet`
@@ -100,6 +100,7 @@ from horsetrack.countries.japan.jravan import (
     bloodlines,
     career_counts,
     dump,
+    exclusions,
     masters,
     mining,
     odds,
@@ -125,6 +126,7 @@ JRAVAN_ONLY = {
     "lineages": bloodlines.LINEAGES_SCHEMA.names,
     "mining_predictions": mining.MINING_PREDICTIONS_SCHEMA.names,  # #406
     "career_counts": career_counts.CAREER_COUNTS_SCHEMA.names,  # #407
+    "exclusions": exclusions.EXCLUSIONS_SCHEMA.names,  # #405
 }
 # the schemas.TABLES tables the jravan builders write (races.py, runners.py, dividends.py,
 # masters.py, horse_runs.py)

@@ -68,11 +68,17 @@ inputs:
     layers: [C0]
     role: feature_at_t
     supplies:
-      - {source: jravan, table: records/RACE/JG, column: _record}
+      - {source: jravan, table: exclusions, column: exclusion_kind,
+         filter: {entry_kind: excluded_at_close}}
+      - {source: jravan, table: exclusions, column: exclusion_kind,
+         filter: {entry_kind: excluded_on_redeclaration}}
     tickets: [405]
     note: >-
-      JV-Data JG (horses excluded from a race's entries, e.g. by ballot), dumped but not mapped
-      into a table, so it has no availability rule.
+      JV-Data JG (horses excluded from a race's entries, e.g. by ballot), mapped into the jravan
+      exclusions table with its publication date (published_date). The table keeps every entry
+      with its entry_kind and exclusion_kind, and consumers filter (the owner's answer on #405,
+      2026-11-28); the coverage counts the excluded entries only, those excluded at close or on
+      redeclaration. Known from 00:00 JST of the race date, the card's rule (availability.yaml).
   result_published:
     layers: [C0, C2, C3]
     role: conditioner

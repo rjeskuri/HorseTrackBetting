@@ -47,6 +47,9 @@ owner accepted the proposed defaults, each conservative relative to JRA's public
     card's rule; the owner's answer B on #407, 2026-11-28). The other half of answer B, a kept
     version created after its race date is dropped and counted, is the build's and is pinned in
     tests/countries/japan/test_jravan_career_counts.py. No label columns.
+15. exclusions (#405, the owner's answer of 2026-11-28): the JRA-VAN-only JG table (every entry,
+    with `entry_kind` and `exclusion_kind`), offset on race_date, 0 (00:00 JST of the race date),
+    the card's rule; no label columns.
 
 The expected rules below are written from that answer, never read back from the config. The
 leakage tests run the shipped rules over small synthetic tables built from the store's column
@@ -80,6 +83,7 @@ from horsetrack.core.store.tables import ARROW_TYPES
 from horsetrack.countries.japan.jravan import (
     bloodlines,
     career_counts,
+    exclusions,
     masters,
     mining,
     odds,
@@ -122,8 +126,8 @@ VIEW_EXTRA = {"races": frozenset({"post_utc"})}
 POST_RESULTS = ("dividends", "sectionals", "incidents", "running_comments")
 ODDS_LABELS = frozenset({"dividend", "is_refund", "is_final_capture"})
 PEDIGREE_LABELS = frozenset({"source_race_id", "scraped_utc"})
-# the JRA-VAN-only tables (#376, + mining_predictions #406): parquet under processed/jravan, not
-# store tables
+# the JRA-VAN-only tables (#376, + mining_predictions #406, + career_counts #407, + exclusions
+# #405): parquet under processed/jravan, not store tables
 JRAVAN_SCHEMAS = {
     "final_odds": odds.FINAL_ODDS_SCHEMA,
     "pool_votes": votes.POOL_VOTES_SCHEMA,
@@ -135,6 +139,7 @@ JRAVAN_SCHEMAS = {
     "mining_predictions": mining.MINING_PREDICTIONS_SCHEMA,
     # #407: the JV-Data CK placing counts, as of the race's card
     "career_counts": career_counts.CAREER_COUNTS_SCHEMA,
+    "exclusions": exclusions.EXCLUSIONS_SCHEMA,
 }
 
 
@@ -184,6 +189,9 @@ OWNER: dict[str, dict] = {
     # answer B on #407, 2026-11-28; tests/countries/japan/test_jravan_career_counts.py pins the
     # view over a built table).
     "career_counts": _offset(0),
+    # The JG exclusions (#405): known from 00:00 JST of the race date, the card's rule (the
+    # owner's answer on #405, 2026-11-28).
+    "exclusions": _offset(0),
 }
 VIEW_TABLES = [t for t, o in OWNER.items() if o["kind"] == "offset"]
 LABEL_ONLY = [t for t, o in OWNER.items() if o["kind"] == "label_only"]
@@ -208,7 +216,8 @@ def rules():
 
 def test_the_shipped_config_has_one_rule_per_table_and_nothing_else(rules):
     assert len(schemas.TABLES) == 14  # 12, + track_condition (#90), + win_sales (#278)
-    assert len(JRAVAN_SCHEMAS) == 9  # 7 (#376), + mining_predictions (#406), + career_counts (#407)
+    # 7 (#376), + mining_predictions (#406), + career_counts (#407), + exclusions (#405)
+    assert len(JRAVAN_SCHEMAS) == 10
     assert not set(JRAVAN_SCHEMAS) & set(schemas.TABLES)  # #376 leaves them out of the store
     assert set(OWNER) == set(schemas.TABLES) | {"odds_timeseries"} | set(JRAVAN_SCHEMAS)
     assert set(rules) == set(OWNER)
@@ -349,7 +358,7 @@ def test_race_day_rows_open_at_midnight_jst_and_past_runs_the_next_day(rules, co
     # race_date 2026-11-28 is row 2
     jst_midnight = datetime(2026, 11, 27, 15, tzinfo=UTC)
     next_midnight = datetime(2026, 11, 28, 15, tzinfo=UTC)
-    for table in ("meetings", "races", "runners", "jrdb_pre_race", "career_counts"):
+    for table in ("meetings", "races", "runners", "jrdb_pre_race", "career_counts", "exclusions"):
         key = ROW_ID.get(table, "race_id")
         assert f"{key}-2" not in set(read_asof(con, table, jst_midnight - US, rules=rules)[key])
         assert f"{key}-2" in set(read_asof(con, table, jst_midnight, rules=rules)[key])

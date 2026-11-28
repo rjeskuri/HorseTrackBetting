@@ -40,6 +40,7 @@ command run by hand. The same inputs give the same bytes.
 | `timeseries` | `timeseries.py` | `odds_timeseries/<YYYY-MM-DD>.parquet` | the odds log's schema | that of `odds_timeseries` |
 | `masters` | `masters.py` | `horses`, `horse_pedigree`; `jockeys`, `trainers` | store tables; jravan-only | `horses` refused, `horse_pedigree` `static`; `current_value` with `in_view` |
 | `bloodlines` | `bloodlines.py` | `breeding_horses`, `produce`, `lineages` | jravan-only | `static` |
+| `exclusions` | `exclusions.py` | `exclusions` | jravan-only | `offset` on `race_date`, 00:00 JST (#405) |
 | `mining` | `mining.py` | `mining_predictions` | jravan-only | `column` on `created_utc` (the owner's rule C, #406) |
 | `workouts` | `handicap/workouts_jravan.py` | `workouts` | jravan-only | none: its readers apply the module's own publication rule (#229), and the as-of views refuse it |
 | `dump` | `dump.py` | `interim/jravan/records/` | not tables | none |

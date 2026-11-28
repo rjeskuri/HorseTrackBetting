@@ -60,9 +60,10 @@ Both stores take the flag from the final result, so a race-day scratch is in the
 
 Layers C0; role `feature_at_t`; tickets #405.
 
-JV-Data JG (horses excluded from a race's entries, e.g. by ballot), dumped but not mapped into a table, so it has no availability rule.
+JV-Data JG (horses excluded from a race's entries, e.g. by ballot), mapped into the jravan exclusions table with its publication date (published_date). The table keeps every entry with its entry_kind and exclusion_kind, and consumers filter (the owner's answer on #405, 2026-11-28); the coverage counts the excluded entries only, those excluded at close or on redeclaration. Known from 00:00 JST of the race date, the card's rule (availability.yaml).
 
-- jravan `records/RACE/JG._record`: withheld (D21)
+- jravan `exclusions.exclusion_kind` where entry_kind = excluded_at_close: withheld (D21)
+- jravan `exclusions.exclusion_kind` where entry_kind = excluded_on_redeclaration: withheld (D21)
 
 ## result_published
 
