@@ -614,10 +614,21 @@ def test_the_exotics_public_report_carries_no_figures(tmp_path, data_dir):
     for result in (result_a, result_b):
         part = result.table.loc[result.table["pool"].isin(NEW_POOLS), columns]
         assert len(part), "no TIERCE or bracket-quinella cell"
-        values = part.to_numpy(dtype=float).ravel()
-        for value in values[np.isfinite(values)]:
-            for text in tpd.renderings(float(value)):
-                assert text not in text_a, f"the figure {text} is in the public report"
+        tpd.assert_no_figure_leaks(text_a, part.to_numpy(dtype=float).ravel())
+
+
+def test_the_exotics_figure_check_holds_against_identities_and_real_figures(tmp_path, data_dir):
+    """#749, DoD 'the figure checks cannot fail because a run id or spec hash contains a
+    figure's digits, and still fail on a real figure': the exotics report's check passes with a
+    run id holding a TIERCE or bracket-quinella figure and fails when that figure is printed."""
+    registry, spec = exotics_frozen(tmp_path)
+    write_exotic_store(data_dir, exotic_races(YEAR_END, range(9)))
+    result = depth.run_depth(**YEAR_END_SPAN, out_dir=data_dir / "reports", registry=registry,
+                             spec_name=EXOTICS)  # fmt: skip
+    columns = ["combo_yen", "pool_yen", *(f"capacity_{float(e):g}" for e in spec["edges"])]
+    part = result.table.loc[result.table["pool"].isin(NEW_POOLS), columns]
+    assert len(part), "no TIERCE or bracket-quinella cell"
+    tpd.assert_figure_check_is_sound(result, part.to_numpy(dtype=float).ravel())
 
 
 def test_the_command_freezes_and_runs_the_exotics_spec(data_dir, summary_folder):
