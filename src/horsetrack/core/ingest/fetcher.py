@@ -5,10 +5,14 @@ source's `http.hosts[<host>]`, else `http.hosts.default`) and its own circuit br
 waits only for the last request to the same host and a host that said stop shuts only itself. The
 gap also covers retries and every redirect hop. Raw bodies are written gzip-compressed and
 atomically to the cache; a cached immutable page is never requested again.
+
+A request may carry an `OriginAuth`: its Authorization header goes on every hop to its one https
+origin and is stripped from any other hop (another host, or the same host over http).
 """
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import math
@@ -17,7 +21,7 @@ import random
 import time
 import zlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -58,6 +62,33 @@ class FetchError(RuntimeError):
         super().__init__(message)
         self.http_status = http_status
         self.final_url = final_url
+
+
+@dataclass(frozen=True)
+class OriginAuth:
+    """An Authorization header bound to one https origin (scheme, host, port). The header value
+    is kept out of repr."""
+
+    origin: str
+    header: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        url = httpx.URL(self.origin)
+        if url.scheme != "https" or not url.host:
+            raise ValueError(f"OriginAuth needs an https origin, got {self.origin!r}")
+
+    @classmethod
+    def basic(cls, origin: str, user: str, password: str) -> OriginAuth:
+        token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+        return cls(origin, f"Basic {token}")
+
+    def apply(self, request: httpx.Request) -> None:
+        """Set the header when `request` goes to the origin, else make sure it carries none."""
+        own, url = httpx.URL(self.origin), request.url
+        if (url.scheme, url.host, url.port) == (own.scheme, own.host, own.port):
+            request.headers["Authorization"] = self.header
+        else:
+            request.headers.pop("Authorization", None)
 
 
 @dataclass(frozen=True)
@@ -281,10 +312,11 @@ class Fetcher:
             )
         return FetchError(message, http_status=http_status, final_url=final_url)
 
-    def _send(self, task: FetchTask) -> httpx.Response:
+    def _send(self, task: FetchTask, auth: OriginAuth | None = None) -> httpx.Response:
         """One attempt: the request plus its redirect hops. Every hop is a request to the host it
         goes to, so every hop is checked against that host's breaker and waits for its gap
-        (httpx's own redirect following would fire them back to back)."""
+        (httpx's own redirect following would fire them back to back), and gets `auth` only when
+        it goes to auth's origin."""
         headers = {}
         content = task.body.encode("utf-8") if task.body is not None else None
         if content is not None and task.body.lstrip()[:1] in ("{", "["):
@@ -298,6 +330,8 @@ class Fetcher:
             host = request.url.host
             self._check_open(host)
             self._throttle(host)
+            if auth is not None:
+                auth.apply(request)
             self.requests_sent += 1
             response = self._client.send(request, follow_redirects=False)
             if response.next_request is None:
@@ -314,15 +348,16 @@ class Fetcher:
             raise FetchError(f"not an http(s) URL: {task.url!r} for {task.page_type}/{task.key}")
         return url.host
 
-    def request(self, task: FetchTask) -> httpx.Response:
-        """One rate-limited request with retries. No caching. Raises FetchError or CircuitOpen."""
+    def request(self, task: FetchTask, *, auth: OriginAuth | None = None) -> httpx.Response:
+        """One rate-limited request with retries. No caching. Raises FetchError or CircuitOpen.
+        `auth` goes only on hops to its origin."""
         host = self._task_host(task)
         problem, http_status, final_url, extra_wait = "not attempted", None, None, 0.0
         for attempt in range(self._max_retries + 1):
             if attempt:
                 self._sleep(max(self._backoff_base * 2 ** (attempt - 1), extra_wait))
             try:
-                response = self._send(task)
+                response = self._send(task, auth)
             except (httpx.TransportError, httpx.DecodingError) as exc:  # timeouts, resets, DNS
                 problem, http_status, final_url = f"{type(exc).__name__}: {exc}", None, None
                 extra_wait, host = 0.0, _host_of(exc, host)
