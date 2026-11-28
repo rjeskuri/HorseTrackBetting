@@ -21,7 +21,8 @@ log, and that only through ``ShadowLog.append``; the bet log (#453) is only read
 - ``flat_stakes``: the flat stake per pick under the race-day cap (betting.yaml, ``Limits``); no
   Kelly, no threshold. ``log_growth_by_day``: ln(ending / starting money) per race day.
 - ``selection_drift`` (E20): the fall in log odds from t to the final regressed on the claimed EV
-  of the record ``lag_minutes`` earlier, never the board at t itself.
+  of the record ``lag_minutes`` earlier, never the board at t itself; one t at a time with
+  ``tau_minutes``, and with ln O_t as a covariate with ``partial_log_odds`` (#617).
 - ``read_bets`` and ``played_by_day``: the owner's hand-played bets by day and option, beside each
   option's rank on the leaderboard.
 """
@@ -29,7 +30,7 @@ log, and that only through ``ShadowLog.append``; the bet log (#453) is only read
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from numbers import Integral, Real
@@ -335,6 +336,84 @@ def _cluster_ols(
     return slope, float(lo), float(hi), k
 
 
+def _partial_slope(sums: Sequence[np.ndarray]) -> np.ndarray:
+    """The coefficient of x in the OLS of y on [1, x, z], from the sums (1, x, z, y, xx, xz, zz,
+    xy, zy) of each set of rows (by Frisch-Waugh: x and y each centred, then residualised on z)."""
+    n, sx, sz, sy, sxx, sxz, szz, sxy, szy = sums
+    cxx, czz, cxz = sxx - sx * sx / n, szz - sz * sz / n, sxz - sx * sz / n
+    cxy, czy = sxy - sx * sy / n, szy - sz * sy / n
+    return (cxy * czz - cxz * czy) / (cxx * czz - cxz * cxz)
+
+
+def _partial_spread(sums: Sequence[np.ndarray]) -> np.ndarray:
+    """The spread of x left after its regression on [1, z], as a share of x's own (0 to 1): 0
+    when x has no spread beyond z, so its coefficient is not defined."""
+    n, sx, sz, _, sxx, sxz, szz, _, _ = sums
+    cxx, czz, cxz = sxx - sx * sx / n, szz - sz * sz / n, sxz - sx * sz / n
+    with np.errstate(divide="ignore", invalid="ignore"):
+        share = (cxx * czz - cxz * cxz) / (cxx * czz)
+    return np.where((cxx > 0) & (czz > 0), share, 0.0)
+
+
+_MIN_PARTIAL_SPREAD = 1e-9  # below this share x is collinear with [1, z] to rounding
+
+
+def _cluster_ols_partial(
+    x: np.ndarray,
+    z: np.ndarray,
+    y: np.ndarray,
+    clusters: Any,
+    *,
+    n_boot: int,
+    level: float,
+    seed: int,
+) -> tuple[float, float, float, int]:
+    """``_cluster_ols`` with a covariate: (slope, lo, hi, n_clusters) of x's coefficient in the OLS
+    of y on [1, x, z], the interval from the same bootstrap of whole clusters. NotEstimable for
+    fewer than three rows, x or z with no spread or x with none beyond z, one cluster, or a
+    replicate where any of those holds."""
+    pairs = len(x)
+    if pairs < 3:
+        raise NotEstimable(
+            f"{pairs} row(s): a slope beside a covariate needs at least three", n=pairs
+        )
+    xc, zc, yc = x - x.mean(), z - z.mean(), y - y.mean()  # each shift leaves the slope as it is
+    weights = (None, xc, zc, yc, xc * xc, xc * zc, zc * zc, xc * yc, zc * yc)
+    whole = [np.array(float(len(x)) if w is None else float(w.sum())) for w in weights]
+    if not _partial_spread(whole) > _MIN_PARTIAL_SPREAD:
+        raise NotEstimable(
+            "the score has no spread beyond the covariate: the slope is not defined", n=pairs
+        )
+    slope = float(_partial_slope(whole))
+    codes, _ = pd.factorize(pd.Series(clusters), sort=True)
+    k = int(codes.max()) + 1
+    if k < 2:
+        raise NotEstimable(
+            "one cluster: a bootstrap of whole clusters has no spread",
+            n=pairs,
+            slope=slope,
+            n_clusters=k,
+        )
+    sums = [np.bincount(codes, weights=w, minlength=k) for w in weights]
+    rng = np.random.default_rng(seed)
+    chunk = max(1, _MAX_DRAWS_PER_CHUNK // k)
+    slopes = np.empty(n_boot)
+    for start in range(0, n_boot, chunk):
+        stop = min(start + chunk, n_boot)
+        drawn = rng.integers(0, k, size=(stop - start, k))
+        replicate = [s[drawn].sum(axis=1) for s in sums]
+        if not (_partial_spread(replicate) > _MIN_PARTIAL_SPREAD).all():
+            raise NotEstimable(
+                "a replicate's score has no spread beyond the covariate: too few clusters",
+                n=pairs,
+                slope=slope,
+                n_clusters=k,
+            )
+        slopes[start:stop] = _partial_slope(replicate)
+    lo, hi = np.quantile(slopes, [1.0 - level, level])
+    return slope, float(lo), float(hi), k
+
+
 def _aligned(
     x: pd.Series, y: pd.Series, clusters: pd.Series
 ) -> tuple[np.ndarray, np.ndarray, pd.Series]:
@@ -493,8 +572,21 @@ def _meeting(race_id: str) -> str:
     return race_id.rsplit(":", 1)[0]
 
 
+def _positive_minutes(name: str, value: Any) -> None:
+    number = not isinstance(value, bool) and isinstance(value, Real)
+    if not (number and math.isfinite(value) and value > 0):
+        raise ValueError(f"{name} must be a positive number of minutes, got {value!r}")
+
+
 def selection_drift(
-    log: pd.DataFrame, *, lag_minutes: float, n_boot: int, level: float, seed: int
+    log: pd.DataFrame,
+    *,
+    lag_minutes: float,
+    n_boot: int,
+    level: float,
+    seed: int,
+    tau_minutes: float | None = None,
+    partial_log_odds: bool = False,
 ) -> RegressionResult:
     """E20: does the overlay score predict the fall in log odds to the final?
 
@@ -506,16 +598,19 @@ def selection_drift(
     joined to the frame by the caller. Rows without that lagged record or its score, without a
     positive board or final figure, no_board rows and holdout rows (labelled, or by the rule) are
     dropped, never filled; holdout rows give no score either. ``lo`` and ``hi`` come from a
-    bootstrap of whole meetings (venue x day), as ``calibration_slope``'s. ValueError for a lag
-    that is not a positive number, or a frame without ``final_odds``; NotEstimable when too few
-    rows, scores or meetings remain."""
-    if (
-        isinstance(lag_minutes, bool)
-        or not isinstance(lag_minutes, Real)
-        or not math.isfinite(lag_minutes)
-        or lag_minutes <= 0
-    ):
-        raise ValueError(f"lag_minutes must be a positive number of minutes, got {lag_minutes!r}")
+    bootstrap of whole meetings (venue x day), as ``calibration_slope``'s.
+
+    ``tau_minutes`` keeps only the records at that t, so one (t, lag) pair is scored and no two
+    decision times are pooled; None (the default) regresses every t with a record at t + lag.
+    ``partial_log_odds`` adds ln(``board_odds``) at t, the board of the record whose fall is
+    regressed, as a covariate (OLS of the fall on [1, score, ln O_t]) and reports the score's
+    coefficient, so a score that only tracks the odds level does not read as an overlay effect.
+
+    ValueError for a lag or tau that is not a positive number, or a frame without
+    ``final_odds``; NotEstimable when too few rows, scores or meetings remain."""
+    _positive_minutes("lag_minutes", lag_minutes)
+    if tau_minutes is not None:
+        _positive_minutes("tau_minutes", tau_minutes)
     _check_boot(n_boot, level)
     if "final_odds" not in log.columns:
         raise ValueError("selection_drift needs final_odds, the final board's figure per record")
@@ -532,22 +627,24 @@ def selection_drift(
         for (race, pool, combination, tau), score in zip(keys, scores, strict=True)
         if not math.isnan(score)
     }
-    x, y, meetings = [], [], []
+    x, y, level_at_t, meetings = [], [], [], []
     for (race, pool, combination, tau), at_t, at_final in zip(keys, board, final, strict=True):
+        if tau_minutes is not None and float(tau) != float(tau_minutes):
+            continue
         lagged = lookup.get((race, pool, combination, float(tau) + lag_minutes))
         if lagged is None or not (at_t > 0 and at_final > 0):  # NaN fails too
             continue
         x.append(lagged)
         y.append(math.log(at_t) - math.log(at_final))
+        level_at_t.append(math.log(at_t))
         meetings.append(_meeting(race))
-    slope, lo, hi, k = _cluster_ols(
-        np.array(x, dtype=float),
-        np.array(y, dtype=float),
-        meetings,
-        n_boot=n_boot,
-        level=level,
-        seed=seed,
-    )
+    boot = {"n_boot": n_boot, "level": level, "seed": seed}
+    xs, ys = np.array(x, dtype=float), np.array(y, dtype=float)
+    if partial_log_odds:
+        zs = np.array(level_at_t, dtype=float)
+        slope, lo, hi, k = _cluster_ols_partial(xs, zs, ys, meetings, **boot)
+    else:
+        slope, lo, hi, k = _cluster_ols(xs, ys, meetings, **boot)
     return RegressionResult(slope=slope, lo=lo, hi=hi, n=len(x), n_clusters=k)
 
 
