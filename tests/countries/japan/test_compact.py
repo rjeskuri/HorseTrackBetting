@@ -12,6 +12,10 @@ Contract pinned here:
 - minutes_to_post = (post_utc - (fetched_utc or snapshot_utc)) in minutes, from the venue's own
   sidecar by race number; negative after the post; null when the venue has no sidecar or the
   sidecar has no entry for the race.
+- (#411) Where the sidecar has no entry for a race (or there is no sidecar), post_utc comes from
+  the stored race card, `processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet` (`race_no`,
+  `post_time_local`, Tokyo time: the card `board.snapshot.post_times_for` reads). Per race the
+  sidecar's entry wins; a race on neither, or with a null post time on the card, stays null.
 - is_final_capture marks the row with the latest snapshot_utc instant per (race_id, pool,
   combination), pool totals included; exactly one per key, and at the same instant the later row
   in the log wins (as `odds_log.latest_prices` does).
@@ -606,6 +610,80 @@ def test_several_venues_in_one_day_use_their_own_sidecars():
         "KYO": (rid("KYO", 11), 11, pytest.approx(15.0)),
         "NAK": (rid("NAK", 11), 11, pytest.approx(50.0)),
     }
+
+
+# ---------------------------------------------------------------- post times from the card (#411)
+
+
+def write_card(venue: str, races: dict[int, str | None], *, day: str = D) -> Path:
+    """The stored race card of one meeting, where `board.snapshot` reads it:
+    `processed/jra/upcoming/jra_<date>_<VENUE>/races.parquet`, with `post_time_local` the Tokyo
+    clock as ISO text (with or without its +09:00 offset; without one it is Tokyo time)."""
+    path = paths.processed_dir("jra") / "upcoming" / f"jra_{day}_{venue}" / "races.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nos = sorted(races)
+    table = pa.table(
+        {
+            "race_id": pa.array([rid(venue, no, day) for no in nos], pa.string()),
+            "meeting_id": pa.array([f"jra:{day}:{venue}"] * len(nos), pa.string()),
+            "race_no": pa.array(nos, pa.int64()),
+            "race_class": pa.array(["C1"] * len(nos), pa.string()),
+            "post_time_local": pa.array([races[no] for no in nos], pa.string()),
+        }
+    )
+    pq.write_table(table, path)
+    return path
+
+
+def test_minutes_to_post_from_the_race_card_where_the_sidecar_has_none():
+    """#411: a logged day whose venue has no `<VENUE>.races.json` entry for a race takes the race's
+    post time from the stored race card, so `minutes_to_post` is set. Per race, the sidecar's
+    entry wins over the card's; the card fills the races the sidecar does not list; a race on
+    neither (or on the card with a null post time) stays null.
+
+    TOK: card only. KYO: a sidecar for race 11 (which the card times differently) and the card for
+    race 12, whose post time is written without an offset (Tokyo time). NAK: on the card with a
+    null post time (race 5) and not on it (race 6). HAN: neither card nor sidecar."""
+    write_card("TOK", {11: f"{D}T15:40:00+09:00", 12: f"{D}T16:15:00+09:00"})
+    write_sidecar("KYO", {11: at(D, 6, 25)})
+    write_card("KYO", {11: f"{D}T15:30:00+09:00", 12: f"{D}T16:05:00"})
+    write_card("NAK", {5: None, 7: f"{D}T12:00:00+09:00"})
+    expected_post = {
+        rid("TOK", 11): at(D, 6, 40),
+        rid("TOK", 12): at(D, 7, 15),
+        rid("KYO", 11): at(D, 6, 25),  # the sidecar's, not the card's 06:30
+        rid("KYO", 12): at(D, 7, 5),
+        rid("NAK", 5): None,
+        rid("NAK", 6): None,
+        rid("HAN", 3): None,
+    }
+    instants = [at(D, 6, 0), at(D, 6, 21, 30), at(D, 6, 38), at(D, 7, 9)]
+    for venue, nos in (("TOK", (11, 12)), ("KYO", (11, 12)), ("NAK", (5, 6)), ("HAN", (3,))):
+        captures = []
+        for i, when in enumerate(instants):
+            capture = []
+            for no in nos:
+                extra = {"fetched_utc": when - timedelta(seconds=20)} if i == 1 else {}
+                capture.append(price(venue, no, "WIN", "1", 3.0 + i, when, **extra))
+                capture.append(total(venue, no, "WIN", 1e6 * (i + 1), when))
+            captures.append(capture)
+        write_log(venue, captures)
+
+    schema, rows = read_day(compact_day(D))
+
+    assert_utc_timestamp(schema, "post_utc")
+    assert {r["race_id"] for r in rows} == set(expected_post)
+    assert len(rows) == len(instants) * 2 * len(expected_post)
+    for row in rows:
+        post = expected_post[row["race_id"]]
+        if post is None:
+            assert is_null(row["post_utc"]), row
+            assert is_null(row["minutes_to_post"]), row
+            continue
+        assert row["post_utc"] == post, row
+        origin = row["fetched_utc"] if not is_null(row["fetched_utc"]) else row["snapshot_utc"]
+        want = (post - origin).total_seconds() / 60
+        assert row["minutes_to_post"] == pytest.approx(want, abs=1e-9), row
 
 
 # ---------------------------------------------------------------- the CLI
