@@ -21,7 +21,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,6 +311,35 @@ def _parse(data: bytes) -> _Chain:
     return chain
 
 
+def variant_count(records: Iterable[RunRecord]) -> int:
+    """How many variants the family has tried, from its runs ``records``: its distinct run
+    specifications ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
+    feature-table identity of each data build (``_feature_tables``), compared as canonical
+    JSON so mapping key order does not matter. Each counts once whatever its status or number
+    of runs, failed ones included; a change to params, components, fold_scheme, sources or a
+    build's identity, or an added, removed or renamed build, is a new variant even under the
+    same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
+    holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
+    ``records()``, not another variant. ``Registry.family_size`` is this over one family's runs.
+    """
+    return len(
+        {
+            _canonical(
+                [
+                    r.hypothesis_id,
+                    r.variant,
+                    r.fold_scheme,
+                    r.sources,
+                    r.components,
+                    r.params,
+                    _feature_tables(r.data_builds),
+                ]
+            )
+            for r in records
+        }
+    )
+
+
 class Registry:
     """One country's run registry: append-only, hash-chained JSON lines."""
 
@@ -368,32 +397,8 @@ class Registry:
         return runs if family_id is None else [r for r in runs if r.family_id == family_id]
 
     def family_size(self, family_id: str) -> int:
-        """How many variants the family has tried: its distinct run specifications
-        ``(hypothesis_id, variant, fold_scheme, sources, components, params)`` plus the
-        feature-table identity of each data build (``_feature_tables``), compared as canonical
-        JSON so mapping key order does not matter. Each counts once whatever its status or number
-        of runs, failed ones included; a change to params, components, fold_scheme, sources or a
-        build's identity, or an added, removed or renamed build, is a new variant even under the
-        same label. A later decision, retry or rerun (another status, owner_signoff, metrics,
-        holdout_open, git_sha or ticket, or a refresh of the same builds) is another run in
-        ``records()``, not another variant.
-        """
-        return len(
-            {
-                _canonical(
-                    [
-                        r.hypothesis_id,
-                        r.variant,
-                        r.fold_scheme,
-                        r.sources,
-                        r.components,
-                        r.params,
-                        _feature_tables(r.data_builds),
-                    ]
-                )
-                for r in self.records(family_id)
-            }
-        )
+        """How many variants the family has tried; the rule is `variant_count`'s."""
+        return variant_count(self.records(family_id))
 
     def freeze_family(self, family_id: str, spec: dict) -> str:
         """Freeze the family's pre-registered spec and return its hash (sha256 hex of the spec's

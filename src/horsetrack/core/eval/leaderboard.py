@@ -66,7 +66,13 @@ from pathlib import Path
 from scipy.stats import norm
 
 from horsetrack.core import env
-from horsetrack.core.eval.registry import FoldMetric, Registry, RunRecord, is_licensed_record
+from horsetrack.core.eval.registry import (
+    FoldMetric,
+    Registry,
+    RunRecord,
+    is_licensed_record,
+    variant_count,
+)
 from horsetrack.core.eval.reports import (
     LicensedOutputInRepo,
     is_inside,
@@ -690,13 +696,16 @@ def rows_from_registry(
     ``is_licensed_record`` (an adapter's row also keeps its own True).
     """
     adapters = adapters or {}
+    # one read of the registry; a family's size counts every run of it, holdout runs included
+    all_runs: dict[str, list[RunRecord]] = {}
     families: dict[str, list[RunRecord]] = {}
     for record in registry.records():
+        all_runs.setdefault(record.family_id, []).append(record)
         if record.holdout_open is None:
             families.setdefault(record.family_id, []).append(record)
     latest: dict[str, LeaderboardRow] = {}
     for family_id, runs in families.items():
-        size = registry.family_size(family_id)
+        size = variant_count(all_runs[family_id])
         adapter = adapters.get(family_id)
         for record in runs:
             made, problem = _record_rows(record, size, adapter)
