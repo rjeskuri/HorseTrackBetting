@@ -308,3 +308,19 @@ bounds, settlement, N5, the candidate-cell schema and ranking), with these chang
 - Pages: after `--run --family v2`, the public `docs/experiments/cross-pool-japan-v2.md` (every
   figure withheld, D21); v1's `docs/experiments/cross-pool-japan.md` is never rewritten by a v2
   run. The CLI regenerates this study's registry summary pages only (`write_committed_summary`).
+
+### v2 freeze and run
+
+- Freeze, 2026-11-28, at commit `88116cc` on branch `t/562-cross-pool-v2-family-name-the` (the
+  squash merge carries another hash): `python -m horsetrack.countries.japan.studies.cross_pool_run
+  --freeze --family v2 --from 2014-06-07 --to 2026-11-27 --seed 435`, family
+  `japan-cross-pool-t2-v2`, spec sha256
+  `86697c3987cebd7a3b1f59bfbad772e36b8a4d18ddbffad455ca62ef82274dc4`, frozen with
+  `Registry.freeze_family` in the japan registry before any scored read.
+- Run, 2026-11-28, at the same commit: `--run --family v2 --from 2014-06-07 --to 2026-11-27
+  --seed 435`, data fingerprint `ce44162831c80cde`, one record per variant, run ids
+  `d161da9abb090ad0`, `dad07deeb223f503`, `e1017ebfe2d5ba7e`, `ea2606f2ff698928` and
+  `db4af658f1c4193f`; no variant failed. Its private report is
+  `$HORSETRACK_DATA_DIR/reports/cross-pool-japan-86697c3987ce-data-ce44162831c80cde.md`, its
+  cells `$HORSETRACK_DATA_DIR/reports/candidate-cells/cross-pool-japan-86697c3987ce-data-ce44162831c80cde.json`,
+  and its public page `docs/experiments/cross-pool-japan-v2.md`. Every figure is withheld (D21).
