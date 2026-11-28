@@ -1226,9 +1226,11 @@ def _bounds_cells(text: str) -> dict[str, list[str]]:
 
 ARTIFACT_KINDS = (("e1-", ".json"), ("e1-", ".md"), ("breakage-", ".json"), ("breakage-", ".md"),
                   ("max-test-", ".json"))  # fmt: skip
+# "notes" is #88's optional RunRecord field (run metadata outside the variant identity; a record
+# without notes keeps its id). The guard pins #431's own change: the list stays exact and ordered.
 RUN_RECORD_FIELDS = ["hypothesis_id", "family_id", "variant", "ticket", "git_sha", "data_builds",
                      "sources", "fold_scheme", "components", "params", "metrics", "status",
-                     "holdout_open", "owner_signoff"]  # fmt: skip
+                     "holdout_open", "owner_signoff", "notes"]  # fmt: skip
 
 
 def test_two_data_builds_at_one_commit_keep_separate_report_artifacts(isolated, monkeypatch):
