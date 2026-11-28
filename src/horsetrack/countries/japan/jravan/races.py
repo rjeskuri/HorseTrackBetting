@@ -4,11 +4,12 @@
 store writes (`countries/japan/jra/netkeiba/parse_results.py`); `meetings_from_races` derives the
 meetings. `build_races` reads `raw/jravan/stored/RACE/RA/<YYYY>.jvd` one year at a time, keeps one
 version per race (`records.latest_versions` on the layout's key items) and the JRA venues (01-10),
-and writes `processed/jravan/races.parquet` and `meetings.parquet` in the store's column order,
-types and sort keys. The code values each mapping uses are the constants below (the code-table
-text stays in the licensed workbook); a code a mapping lacks becomes null and is counted per code
-in the report. A blank or all-zero code is JV-Data's "unset": a null value (its `*_raw` column
-too), counted as unmapped only on a race that was run. See docs/specs/jravan.md.
+and writes `processed/jravan/races.parquet` (one row group per race day, #502) and
+`meetings.parquet` in the store's column order, types and sort keys. The code values each mapping
+uses are the constants below (the code-table text stays in the licensed workbook); a code a
+mapping lacks becomes null and is counted per code in the report. A blank or all-zero code is
+JV-Data's "unset": a null value (its `*_raw` column too), counted as unmapped only on a race that
+was run. See docs/specs/jravan.md.
 """
 
 from __future__ import annotations
@@ -222,7 +223,9 @@ def _sorted(frame: pd.DataFrame, table: str) -> pd.DataFrame:
 
 def _write(frame: pd.DataFrame, table: str, out: Path) -> None:
     arrow = pa.Table.from_pandas(frame, schema=arrow_schema(table), preserve_index=False)
-    records.write_parquet(arrow.replace_schema_metadata(None), out / f"{table}.parquet")
+    path = out / f"{table}.parquet"
+    # races: one row group per race day, as the price tables (#502)
+    records.write_parquet(arrow.replace_schema_metadata(None), path, by_day=table == "races")
 
 
 def _read_year(path: Path, layout: spec.RecordSpec) -> dict[str, np.ndarray]:
