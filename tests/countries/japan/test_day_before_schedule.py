@@ -13,7 +13,10 @@ Config
   (`source_config(config, "nar")`) never inherits it, as with tier2 and results.
 - logger.yaml: tier 1 `pools` are WIN, PLACE, QUINELLA, QUINELLA_PLACE and BRACKET_QUINELLA (its
   own page: `requests.per_race` 4); tier 2 keeps FORECAST, TRIO, TIERCE (`tier2.requests.per_race`
-  3). The windows (07:00 every 300 s, 09:30 every 20 s), the stop and the hot races are unchanged.
+  3). The windows (07:00 every 300 s, 09:30 every 20 s), the stop and the hot races are unchanged,
+  but for `hot_races.floor_s` 300: the owner's 5-minute floor (#387, option (a), 2026-11-28),
+  which test_five_minute_floor.py pins on the race date (a stale race outranks the hot races but
+  the nearest; those keep inside the health line's MAX_GAP_S). This file's CONFIG has no floor_s.
 
 Site
 - With `day_before`, a site also has `sales_open() -> bool`: whether the オッズ menu lists the race
@@ -393,8 +396,11 @@ def test_logger_yaml_ships_the_358_rules():
     tier2 = shipped["tier2"]
     assert sorted(tier2["pools"]) == ["FORECAST", "TIERCE", "TRIO"], tier2["pools"]
     assert tier2["requests"] == {"navigation": 2, "per_race": 3}, tier2["requests"]
-    # unchanged: the race date's windows, hot races and stop
-    for key in ("windows", "hot_races", "stop", "after_last_race_min", "min_poll_interval_s"):
+    # unchanged: the race date's windows, hot races and stop; #387 adds the owner's floor
+    hot = dict(shipped["hot_races"])
+    assert hot.pop("floor_s", None) == GRAIN_S, f"hot_races.floor_s: {shipped['hot_races']}"
+    assert hot == CONFIG["hot_races"], f"logger.yaml hot_races: {shipped['hot_races']!r}"
+    for key in ("windows", "stop", "after_last_race_min", "min_poll_interval_s"):
         assert shipped[key] == CONFIG[key], f"logger.yaml {key}: {shipped[key]!r}"
 
     db = shipped.get("day_before")

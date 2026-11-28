@@ -712,11 +712,13 @@ def test_logger_yaml_ships_a_schedule_per_source():
     assert {"jra", "nar"} >= set(shipped["sources"]) and "jra" in shipped["sources"]
 
     jra = source_config(shipped, "jra")
-    # #358: bracket quinella every round with tier 1, on a page of its own
+    # #358: bracket quinella every round with tier 1, on a page of its own; #387: the owner's
+    # 5-minute floor in JRA's hot_races (NAR's own hot_races has none: checked below)
     shipped_jra = {
         **JRA_CONFIG,
         "pools": ["WIN", "PLACE", "QUINELLA", "QUINELLA_PLACE", "BRACKET_QUINELLA"],
         "requests": {"navigation": 2, "per_race": 4},
+        "hot_races": {**JRA_CONFIG["hot_races"], "floor_s": 300},
     }
     for key, value in shipped_jra.items():
         assert jra.get(key) == value, f"JRA's {key} changed: {jra.get(key)!r}"
@@ -737,6 +739,9 @@ def test_logger_yaml_ships_a_schedule_per_source():
             f"at {hhmm(t)} a NAR round ({every_s_at(t, nar)} s x {rps}) fits no race"
         )
     assert not nar.get("tier2"), "NAR has no tier-2 capture"
+    assert "floor_s" not in nar["hot_races"], (
+        f"NAR inherited JRA's floor (#387): {nar['hot_races']}"
+    )
     assert "day_before" not in nar, "NAR has no day-before window (#358)"
     # The owner's NAR block policy: pause 15 minutes, resume once at half nar.yaml's rate. JRA's
     # stays as it was (cooldown null, checked with the rest of JRA_CONFIG above).
