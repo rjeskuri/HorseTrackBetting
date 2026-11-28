@@ -54,6 +54,7 @@ from horsetrack.core.eval.registry import (
     _sha256,
     _spec_hash,
     default_registry,
+    masked_row,
     summary_dir,
     write_summary,
 )
@@ -1032,8 +1033,9 @@ _INDEX_ENTRY = re.compile(r"- \[([^\]]+)\]\(\1\.md\)")  # a family's line in wri
 
 
 def _table_lines(text: str) -> Counter:
-    """A summary file's table lines (its header and one per run and metric), as a multiset."""
-    return Counter(line for line in text.splitlines() if line.startswith("|"))
+    """A summary file's table lines (its header and one per run and metric), as a multiset, a
+    licensed-source row written before #82 (its status shown) taken in its masked form."""
+    return Counter(masked_row(line) for line in text.splitlines() if line.startswith("|"))
 
 
 def write_committed_summary(registry: Registry) -> tuple[Path, list[str]]:

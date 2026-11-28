@@ -11,7 +11,8 @@ A run's id is the sha256 hex of its record's canonical JSON: the same run twice 
 family's pre-registered spec is frozen with ``freeze_family``; the freeze is a line of its own,
 not a run. ``write_summary`` writes the committed, aggregate-only view, one file per family: E id,
 variant, status and per-fold metric, value, CI and n, with the status and values of
-licensed-source runs withheld.
+licensed-source runs withheld. ``masked_row`` maps a licensed-source row written before #82, its
+status shown, to that masked form.
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ __all__ = [
     "RunRecord",
     "default_registry",
     "is_licensed_record",
+    "masked_row",
     "summary_dir",
     "summary_stem",
     "write_summary",
@@ -495,6 +497,26 @@ def summary_dir(country: str) -> Path:
 
 def _cell(value: str) -> str:
     return " ".join(value.split()).replace("|", "\\|")
+
+
+_UNESCAPED_PIPE = re.compile(r"(?<!\\)\|")  # a cell border: `_cell` escapes a pipe as `\|`
+
+
+def masked_row(line: str) -> str:
+    """``line`` as ``write_summary`` writes it now: a licensed-source run's row in the form
+    written before #82 (``| E id | variant | status | withheld (licensed source) | | | | |``)
+    becomes its masked form (``| E id | variant | withheld (licensed source) | | | | | |``);
+    every other line, public rows included, comes back unchanged. Lets a caller compare a
+    published summary file with a fresh one row for row."""
+    cells = _UNESCAPED_PIPE.split(line)
+    if len(cells) != 10 or cells[0] or cells[-1]:
+        return line
+    hypothesis_id, variant, status = (cell.strip() for cell in cells[1:4])
+    if status not in STATUSES:
+        return line
+    if line != f"| {hypothesis_id} | {variant} | {status} | {WITHHELD_LABEL} | | | | |":
+        return line
+    return f"| {hypothesis_id} | {variant} | {WITHHELD_LABEL} | | | | | |"
 
 
 def _number(value: float | None) -> str:
