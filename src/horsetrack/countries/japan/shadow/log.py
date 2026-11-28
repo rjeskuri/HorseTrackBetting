@@ -4,13 +4,16 @@
 chained to the one before it by sha256, and a seal line once the day is closed. The log sets each
 record's ``day_status`` from the holdout rule (#71). A holdout day's records are written and
 verified here but never read back: settlement and calibration reach them through
-``LockedHoldout.open`` (#101). The format is in docs/specs/shadow-log.md.
+``LockedHoldout.open`` (#101). Records are versioned (#564): ``record_version`` 2 carries
+``p_model``; a record without the field is version 1 and has no ``p_model``. The format is in
+docs/specs/shadow-log.md.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -41,6 +44,8 @@ REQUIRED = (
 MODES = ("live", "replay")
 STATUSES = ("ok", NO_BOARD)
 STAKE_LIKE = ("stake", "bet", "kelly", "amount", "wager")
+RECORD_VERSION = 2  # the version a record carrying p_model states (#564); absent means 1
+RECORD_VERSIONS = (1, RECORD_VERSION)
 
 Key = tuple[str, str, str, int]
 
@@ -128,6 +133,36 @@ def _instant(value: Any) -> datetime | None:
     return stamp if stamp.utcoffset() is not None else None
 
 
+def record_version(record: dict[str, Any]) -> int:
+    """The record's ``record_version``; 1 for a record without one (written before #564)."""
+    return record.get("record_version", 1)
+
+
+def _number(value: Any) -> bool:
+    """A finite int or float, not a bool."""
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _version_refusal(record: dict[str, Any]) -> str | None:
+    """Why the record's version, ``p_model`` or ``value_model`` is refused, or None."""
+    if "record_version" in record and (
+        type(record["record_version"]) is not int or record["record_version"] not in RECORD_VERSIONS
+    ):
+        return f"has a record_version other than {' or '.join(map(str, RECORD_VERSIONS))}"
+    version = record_version(record)
+    if version == RECORD_VERSION and "p_model" not in record:
+        return f"is version {RECORD_VERSION} but lacks p_model"
+    if version == 1 and "p_model" in record:
+        return "has a p_model but is version 1"
+    p_model = record.get("p_model")
+    if p_model is not None and not (_number(p_model) and 0 <= p_model <= 1):
+        return "has a p_model that is neither null nor a number in [0, 1]"
+    value = record.get("value_model")
+    if value is not None and not (_number(value) and value >= 0):
+        return "has a value_model that is neither null nor a finite number >= 0"
+    return None
+
+
 def _stake_like_key(value: Any) -> str | None:
     """The first key, at any depth, that names a stake, bet, kelly, amount or wager."""
     if isinstance(value, dict):
@@ -165,6 +200,9 @@ def _refusal(record: Any) -> str | None:
         return f"has a status other than {' or '.join(STATUSES)}"
     if record["models"] is not None and not isinstance(record["models"], dict):
         return "has models that are neither fit ids nor null"
+    reason = _version_refusal(record)
+    if reason is not None:
+        return reason
     decision = _instant(record["decision_utc"])
     if decision is None:
         return "has a decision_utc that is not ISO text with a UTC offset"
