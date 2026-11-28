@@ -28,8 +28,17 @@ Rules (docs/specs/board-feed.md, "The shadow feed"):
   taken as after the opening). Without an ordering fit only WIN; without models None. On the
   page it never reaches a value or a flag; shadow-day (#564) logs the same p_model of its
   decision board through `_p_model` and `_starters`.
+- `p_member` and `member` (ticket #717), per race when `models.member` names a segment (else the
+  keys are absent): a race whose `race_class` on the stored card (`snapshot.card_race_classes`)
+  is a segment the pointer names carries `p_member`, {horse: P(win)} of #438's member fit
+  (`models.v0.member`) at the board's q over the runners on the board, and `member`, {"segment",
+  "k", "status": None, "marked": the horses with p_member / q >= k}; without a JRDB member value
+  (`workouts_jrdb__*`) for any runner in `member_inputs(race_id)` it has `p_member` None and
+  status "no JRDB data", no figure; any other race has both None. Display only: no value, flag,
+  p_model or shadow-log record reads it.
 - `cache`: a mapping the caller keeps between builds. A race's values are recomputed only when its
-  board (capture time and figures) or its bucket changed, its p_model only when its board did;
+  board (capture time and figures) or its bucket changed, its p_model only when its board did, its
+  p_member when its board or its member inputs did;
   flags read the clock on every build. The log readers live in the same mapping, so a rebuild
   parses only the members appended since.
 """
@@ -39,12 +48,13 @@ from __future__ import annotations
 import logging
 import math
 from bisect import bisect_left
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from horsetrack.core.config import load_country_yaml
 from horsetrack.countries.japan import odds_log
@@ -86,6 +96,9 @@ RANGE_FIELDS = ("value_at_low", "value_at_high")
 
 Entry = tuple[datetime, int, dict[str, Any]]  # (available, seq, row)
 LADDER_MINUTES = (20, 10, 5, 2)  # the ladder's checkpoints before the post; 0 is the final
+JRDB_PREFIX = "workouts_jrdb__"  # #438's JRDB member columns: without one the member shows nothing
+NO_JRDB = "no JRDB data"
+MEMBER_FAILED = "member failed"
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -370,6 +383,79 @@ def _p_model(
     return found
 
 
+# ---------------------------------------------------------------- the horse member (#717)
+
+
+def _input_value(value: Any) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return math.nan
+    return out if math.isfinite(out) else math.nan
+
+
+def _runner_inputs(inputs: Mapping | None, horse: int) -> Mapping:
+    """One runner's member inputs, keyed by its number (an int, or its text)."""
+    if not isinstance(inputs, Mapping):
+        return {}
+    row = inputs.get(horse, inputs.get(str(horse)))
+    return row if isinstance(row, Mapping) else {}
+
+
+def _member(
+    board: RaceBoard,
+    segment: str,
+    entry: Any,
+    inputs: Mapping | None,
+    cache: MutableMapping | None,
+) -> tuple[dict[str, float] | None, dict[str, Any]]:
+    """(p_member, member) of one DEBUT or MAIDEN race (docs/specs/board-feed.md, "The horse
+    member"): the member fit's P(win) at the board's q over the runners on the board, and the
+    horses with p_member / q >= k; no figure without a JRDB member value for any runner."""
+    fit, k = entry.fit, float(entry.k)
+    runners = sorted(board.win)
+    rows = {h: _runner_inputs(inputs, h) for h in runners}
+    columns = {f: tuple(_input_value(rows[h].get(f)) for h in runners) for f in fit.features}
+    head = {"segment": segment, "k": k}
+    jrdb = any(
+        math.isfinite(_input_value(v))
+        for row in rows.values()
+        for name, v in row.items()
+        if str(name).startswith(JRDB_PREFIX)
+    )
+    if not runners or not jrdb:
+        return None, {**head, "status": NO_JRDB, "marked": []}
+    key = (
+        board.race_id,
+        _iso(board.capture_utc),
+        fit.fit_id,
+        k,
+        tuple(sorted(board.win.items())),
+        tuple((f, tuple(None if math.isnan(v) else v for v in vs)) for f, vs in columns.items()),
+    )
+    slot = ("member", board.race_id)
+    if cache is not None:
+        hit = cache.get(slot)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+    try:
+        inv = np.array([1.0 / board.win[h] for h in runners])
+        q = inv / inv.sum()
+        frame = pd.DataFrame({f: np.asarray(vs, dtype=float) for f, vs in columns.items()})
+        p = np.asarray(fit.predict(q, frame), dtype=float)
+        if p.shape != (len(runners),) or not np.isfinite(p).all():
+            raise ValueError(f"member predict returned {p!r} for {len(runners)} runners")
+    except Exception:  # the race shows without the member; tried again on the next build
+        log.exception("%s: horse member failed; shown without", board.race_id)
+        return None, {**head, "status": MEMBER_FAILED, "marked": []}
+    p_member = {str(h): float(v) for h, v in zip(runners, p, strict=True)}
+    marked = [str(h) for h, pv, qv in zip(runners, p, q, strict=True) if pv / qv >= k]
+    found = (p_member, {**head, "status": None, "marked": marked})
+    if cache is not None:
+        cache[slot] = (key, found)
+    return found
+
+
 # ---------------------------------------------------------------- the odds ladder (#499)
 
 
@@ -517,8 +603,11 @@ def build_shadow(
     seed: int = 0,
     cache: MutableMapping | None = None,
     day_dir: Path | None = None,
+    member_inputs: Callable[[str], Mapping | None] | None = None,
 ) -> dict[str, Any]:
-    """The shadow values and avoid flags of every race of `race_date` with a board as of now()."""
+    """The shadow values and avoid flags of every race of `race_date` with a board as of now().
+    `member_inputs(race_id)`: the race's race-day member inputs, {horse: {column: value}} or None
+    (#717); left out, no race has any."""
     now_utc = now().astimezone(timezone.utc)
     grid = load_decision_grid()
     logged = _venues_logged(race_date, day_dir)
@@ -534,6 +623,8 @@ def build_shadow(
     post_times = {venue: post_times_for(race_date, venue, day_dir=day_dir) for venue in logged}
     day_rows.update(logged, now_utc, post_times)
     probe_until = _probe_until(race_date)
+    members = models.member if models is not None else {}
+    classes = {v: snapshot.card_race_classes(race_date, v) for v in logged} if members else {}
 
     races = []
     for venue in logged:
@@ -558,21 +649,32 @@ def build_shadow(
             if models is not None:
                 starters = _starters(board, day_rows.opening.get(race_id), probe_until)
                 p_model = _p_model(board, models, cache, starters)
-            races.append(
-                {
-                    "race_id": race_id,
-                    "venue": venue,
-                    "race_no": race_no,
-                    "post_utc": _iso(post),
-                    "minutes_to_post": None if minutes is None else round(minutes, 2),
-                    "tau_bucket_min": bucket,
-                    "board_capture_utc": _iso(board.capture_utc),
-                    "pools": _pools(
-                        board, flags, values, _ladders(board, day_rows, post, now_utc, models)
-                    ),
-                    "p_model": p_model,
-                }
-            )
+            race = {
+                "race_id": race_id,
+                "venue": venue,
+                "race_no": race_no,
+                "post_utc": _iso(post),
+                "minutes_to_post": None if minutes is None else round(minutes, 2),
+                "tau_bucket_min": bucket,
+                "board_capture_utc": _iso(board.capture_utc),
+                "pools": _pools(
+                    board, flags, values, _ladders(board, day_rows, post, now_utc, models)
+                ),
+                "p_model": p_model,
+            }
+            if members:
+                race["p_member"], race["member"] = None, None
+                segment = classes.get(venue, {}).get(race_no)
+                entry = members.get(segment) if segment is not None else None
+                if entry is not None:
+                    inputs = None
+                    if member_inputs is not None:
+                        try:
+                            inputs = member_inputs(race_id)
+                        except Exception:  # shown as no JRDB data; asked again on the next build
+                            log.exception("%s: member inputs failed", race_id)
+                    race["p_member"], race["member"] = _member(board, segment, entry, inputs, cache)
+            races.append(race)
     return {
         "race_date": race_date.isoformat(),
         "generated_utc": _iso(now_utc),

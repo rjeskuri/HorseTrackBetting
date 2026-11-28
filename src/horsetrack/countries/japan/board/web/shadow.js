@@ -14,7 +14,12 @@
  * combinations by `p_model`, most likely first, each joined to the plain row of its odds ('-'
  * without one), leaving out first every combination /feed shows scratched (a runner SCR on its
  * WIN or PLACE row, or the combination's own row SCR). Every row has a Model p cell, the shadow
- * race's `p_model` as a percent. The pools
+ * race's `p_model` as a percent. In a DEBUT or MAIDEN race whose shadow race has a `member`
+ * (#717, display only), the Win section adds a Horse model % column beside Model p: the shadow
+ * race's `p_member` as a percent ('-' without one), a mark (data-member-mark, its title the k) on
+ * the rows of `member.marked` (p_member / q at least the leaderboard's k, the one exception to
+ * the rule below), and a note in the section head; with a `member.status` ("no JRDB data") the
+ * note says so and the column shows no figure and no mark. The pools
  * without a price forecast (NO_FORECAST: no nowcast, #400) show value = Model p x the odds now
  * and say so; the tier-2 sections show their capture's age. The shadow feed (#121) is joined on
  * (race_id, pool, combination) and never highlights or colours a row by value or probability
@@ -223,10 +228,48 @@
     }).join("");
   }
 
-  var HEAD = LADDER.map(function (c) { return '<th scope="col" class="num">' + c[3] + "</th>"; })
-    .join("") +
-    '<th scope="col" class="num">Model p</th><th scope="col" class="num">Value</th>' +
+  var HEAD_P = LADDER.map(function (c) { return '<th scope="col" class="num">' + c[3] + "</th>"; })
+    .join("") + '<th scope="col" class="num">Model p</th>';
+  var HEAD_MEMBER = '<th scope="col" class="num">Horse model %</th>';
+  var HEAD_REST = '<th scope="col" class="num">Value</th>' +
     '<th scope="col">Read at</th><th scope="col">Flags</th>';
+
+  /* The shadow race's horse member (#717), {segment, k, status, marked}, or null. */
+  function memberOf(race) {
+    var m = own(race, "member");
+    return m && typeof m === "object" ? m : null;
+  }
+
+  /* Whether a section shows the Horse model % column: the Win section of a member race. */
+  function memberShown(race, code) {
+    return code === "WIN" && memberOf(race) !== null;
+  }
+
+  /* The horse-model cell: p_member as a percent ('-' without one), and the p/q mark of a horse
+   * in `marked` (an empty element drawn by CSS, its title naming the k). */
+  function memberCell(race, line) {
+    var m = memberOf(race), horse = String(line.combination);
+    var figures = m.status === null || m.status === undefined;
+    var p = figures ? num(own(own(race, "p_member"), horse)) : null;
+    var marked = figures && Array.isArray(m.marked) && m.marked.map(String).indexOf(horse) >= 0;
+    var k = num(m.k);
+    var mark = marked ? '<span class="member-mark" data-member-mark title="' +
+      esc("p/q ≥ " + (k === null ? "k" : k.toFixed(2))) + '"></span>' : "";
+    return '<td data-col="horse-model" class="num">' + mark + esc(percentText(p)) + "</td>";
+  }
+
+  /* The Win section's note on the member: its status ("no JRDB data") when it has no figures,
+   * else what the column is and the k of the mark. */
+  function memberNote(race) {
+    var m = memberOf(race);
+    if (m === null) return "";
+    if (m.status !== null && m.status !== undefined) {
+      return '<span class="muted small" data-member-status>' + esc(String(m.status)) + "</span>";
+    }
+    var k = num(m.k);
+    return '<span class="muted small">Horse model %: ' + esc(String(m.segment)) +
+      " member" + (k === null ? "" : ", ▲ at p/q ≥ " + esc(k.toFixed(2))) + "</span>";
+  }
 
   /* race_id -> whether the shadow race has the plain feed's post time (the same instant, or a
    * null post time on both feeds: the same unknown schedule). */
@@ -259,7 +302,9 @@
       return has.call(races, String(raceId)) ? races[String(raceId)] : null;
     }
     var columns = {
-      head: HEAD,
+      head: function (raceId, code) {
+        return HEAD_P + (memberShown(shadowRace(raceId), code) ? HEAD_MEMBER : "") + HEAD_REST;
+      },
       cells: function (raceId, code, line) {
         var race = shadowRace(raceId);
         var entry = own(own(own(race, "pools"), code), String(line.combination));
@@ -267,6 +312,7 @@
         var value = NO_FORECAST[code] ? productText(p, line) : valueText(code, entry);
         return ladderCells(entry, line, same[String(raceId)] === true) +
           '<td data-col="p-model" class="num">' + esc(percentText(p)) + "</td>" +
+          (memberShown(race, code) ? memberCell(race, line) : "") +
           '<td data-col="value" class="num val">' + esc(value) + "</td>" +
           '<td data-col="bucket" class="mono small">' + esc(race ? bucketText(race) : DASH) +
           "</td>" + '<td data-col="flags" class="flags">' + flagChips(entry) + "</td>";
@@ -278,7 +324,9 @@
         var body = own(race.pools, code);
         var section = { code: code, body: body,
           note: (NO_FORECAST[code] ? NO_FORECAST_NOTE : "") +
-            (LATEST_ONLY[code] ? captureAgeNote(body, nowMs) : "") };
+            (LATEST_ONLY[code] ? captureAgeNote(body, nowMs) : "") +
+            (memberShown(shadowRace(race.race_id), code) ? memberNote(shadowRace(race.race_id))
+              : "") };
         if (RANKED[code]) {
           section.rows = topRows(pModelOf(shadowRace(race.race_id), code), body, scratched);
         }
