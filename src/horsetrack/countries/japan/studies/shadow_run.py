@@ -10,15 +10,16 @@ and the settlement file, one JSON line per shadow record with its log key, decis
 outcome. Both are named by the spec hash, the commit and the run's artifact id (``_artifact_id``:
 the report's stable results, its run ids, the leaderboard counts and the played options' ranks
 included, but not ``written_utc`` or ``records_appended``, and its settlement text), so a new
-commit, a rebuilt input, a changed result or another leaderboard writes new files beside the old
-ones, and a file that exists is never replaced: a rerun that reproduces an earlier run keeps that
-run's report and settlement file as written.
+commit, a rebuilt input, a changed result or a change in the leaderboard counts or the played
+options' ranks writes new files beside the old ones, and a file that exists is never replaced: a
+rerun that reproduces an earlier run keeps that run's report and settlement file as written.
 
 Inputs: the spec's days' v0 shadow logs (``models.shadow.read_shadow``: development days only), the
 jra store's dividends with the scratch refunds (``bets.settle.day_dividends``), each race's final
 WIN board from the raw odds log (``board.snapshot.final_board``), every bet log on disk
 (``models.shadow.read_bets``) and the leaderboard of the japan registry
-(``core.eval.leaderboard.rows_from_registry``). Nothing here places a bet or opens the holdout.
+(``core.eval.leaderboard.rows_from_registry``), read after the run's own records are appended.
+Nothing here places a bet or opens the holdout.
 """
 
 from __future__ import annotations
@@ -381,8 +382,9 @@ def _leaderboard_block(spec: dict, boot: dict) -> dict:
     }
 
 
-def _bets(ranked: list, limits, out: dict) -> Callable:
-    """Every bet log on disk, settled, by day and option beside the option's rank, with each
+def _bets(limits, out: dict, played: dict) -> Callable:
+    """Every bet log on disk, settled (in ``played["settled"]``, which ``run_study`` joins by day
+    and option to each option's rank once the run's own records are in the registry), with each
     day's staked total (every bet of the day) against the cap: a day over it is flagged, never
     refused (#453 records an over-cap bet as a fact)."""
 
@@ -393,10 +395,9 @@ def _bets(ranked: list, limits, out: dict) -> Callable:
         if not len(bets):
             return [_metric("n_bets", 0, 0)], "no bet log under the data dir's bets/japan", False
         dividends = pd.concat([day_dividends(d) for d in days], ignore_index=True)
-        by_day = played_by_day(settle_bets(bets, dividends), ranked)
+        played["settled"] = settle_bets(bets, dividends)
         day_of = bets["race_id"].str.split(":").str[1]
         staked = pd.to_numeric(bets["stake_yen"]).groupby(day_of).sum()
-        out["bets_by_day"] = by_day.to_dict("records")
         out["day_stakes"] = [
             {"day": d, "staked_yen": int(s), "over_cap": int(s) > limits.day_cap_yen}
             for d, s in staked.items()
@@ -525,11 +526,11 @@ def run_study(out_dir: Path | None = None) -> dict:
         shadow = read_shadow(days)
         settled = settle_shadow(shadow, pd.concat([day_dividends(d) for d in days]))
         finals = final_win_odds(days)
-        rows = rows_from_registry(registry)
         load_error = None
     except Exception as exc:  # the run is still a record: every variant fails with the reason
-        shadow, settled, finals, rows, load_error = None, None, {}, [], exc
+        shadow, settled, finals, load_error = None, None, {}, exc
     out: dict[str, Any] = {}
+    played: dict[str, pd.DataFrame] = {}
     base = {"pool": POOL, "days": spec["days"]}
     plan = [
         (
@@ -563,7 +564,7 @@ def run_study(out_dir: Path | None = None) -> dict:
         )
         for lag in spec["drift"]["lags_min"]
     ]
-    plan.append(("hand-played-bets", "P5", {}, lambda: _bets(rank(shrink(rows)), limits, out)))
+    plan.append(("hand-played-bets", "P5", {}, lambda: _bets(limits, out, played)))
 
     def failed() -> Outcome:
         raise load_error
@@ -580,8 +581,18 @@ def run_study(out_dir: Path | None = None) -> dict:
     records = [_record(v, git_sha, builds, components) for v in variants]
     run_ids = [_sha256(_canonical(asdict(r))) for r in records]  # as Registry.append names a run
     appended = [registry.append(r) for r in records if r not in existing]
+    # The leaderboard as the run leaves it, its own records in: so an identical rerun, which
+    # appends nothing, states the same counts and ranks and keeps this run's artifact id.
+    try:
+        rows = rows_from_registry(registry)
+        ranked, board_error = rank(shrink(rows)), None
+    except Exception as exc:  # the records are in: the report states the unread board and why
+        rows, ranked, board_error = [], [], f"{type(exc).__name__}: {exc}"
+    if "settled" in played:
+        out["bets_by_day"] = played_by_day(played["settled"], ranked).to_dict("records")
     counts = {
         "load_error": None if load_error is None else f"{type(load_error).__name__}: {load_error}",
+        "leaderboard_error": board_error,
         "leaderboard_rows": len(rows),
         "leaderboard_measured": sum(row.measured for row in rows),
     }

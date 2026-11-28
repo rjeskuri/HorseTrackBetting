@@ -86,7 +86,8 @@ import yaml
 
 from horsetrack.core import paths
 from horsetrack.core.eval.holdout import is_holdout_day
-from horsetrack.core.eval.leaderboard import LeaderboardRow, rank
+from horsetrack.core.eval.leaderboard import LeaderboardRow, rank, rows_from_registry, shrink
+from horsetrack.core.eval.registry import FoldMetric, RunRecord, default_registry
 from horsetrack.countries.japan.bets.log import BetLog, Limits, bet_log_path, load_limits
 from horsetrack.countries.japan.bets.settle import settle_bets
 from horsetrack.countries.japan.models.decision import ShadowDecision
@@ -1292,6 +1293,152 @@ def test_the_study_run_names_its_report_by_the_leaderboard_ranks(D, tmp_path, mo
     # The base run's report and settlement file are still as first written.
     now = files_of(out)
     assert {name: now[name] for name in written} == written, "a later run replaced a file"
+
+
+OTHER_FAMILY = "japan-test-other-v1"  # a family already on the board before the study's first run
+
+
+def other_family_record() -> RunRecord:
+    """One measured WIN rule of another family, by the leaderboard convention."""
+    block = {
+        "kind": "rule",
+        "pool": "WIN",
+        "rule": "a synthetic WIN rule of another study",
+        "selection": "decision_time",
+        "payout_rate": 0.8,
+        "ci_level": 0.95,
+        "n_unit": "bets",
+    }
+    return RunRecord(
+        hypothesis_id="P9",
+        family_id=OTHER_FAMILY,
+        variant="rule-x",
+        ticket=452,
+        git_sha="feedbee" + "0" * 33,
+        data_builds={"jra_store": "jra@synthetic-0"},
+        sources=("jra",),
+        fold_scheme="development-days",
+        components={},
+        params={"leaderboard": block},
+        metrics=(FoldMetric("development", "return_per_100", 140.0, 95.0, 185.0, 400),),
+        status="scored",
+    )
+
+
+def test_an_identical_rerun_against_the_real_registry_keeps_its_report(D, tmp_path, monkeypatch):
+    # The leaderboard is read from the japan registry under the data dir, never stubbed: the study's
+    # own twelve records join it on the first run, and the report must state that board.
+    t11, k5, n1, n2 = race(11), race(5, "KYO"), race(1, "NAK", D2), race(2, "NAK", D2)
+    records = [  # three picks at T-2 (value_q05 above 1, no flag) over three meetings: two win
+        v0_record(t11, "WIN", "4", tau=2, value_mean=1.12, value_q05=1.04),
+        v0_record(t11, "WIN", "2", tau=2, value_mean=0.85, value_q05=0.70),
+        v0_record(t11, "WIN", "4", tau=5, value_mean=1.05),
+        v0_record(k5, "WIN", "1", tau=2, value_mean=0.95),
+        v0_record(k5, "WIN", "8", tau=2, value_mean=1.30, value_q05=1.10),
+        v0_record(n1, "WIN", "3", tau=2, value_mean=1.02, value_q05=1.01),
+        v0_record(n1, "WIN", "6", tau=2, value_mean=0.90),
+    ]
+    paid = {
+        D1: [paying(t11, "WIN", "4", 350), paying(k5, "WIN", "8", 1_200)],
+        D2: [paying(n1, "WIN", "6", 480), paying(n2, "WIN", "1", 1_740)],
+    }
+    finals = {(t11, "4"): 3.4, (t11, "2"): 6.0, (k5, "1"): 2.5, (k5, "8"): 12.0}
+    finals |= {(n1, "3"): 4.0, (n1, "6"): 4.8}
+    # The study's own pick option, as the leaderboard names a run's row: '<family>/<variant>'.
+    pick = f"{shadow_run.FAMILY_ID}/{shadow_run.PICK_OPTION}"
+    other = f"{OTHER_FAMILY}/rule-x"
+    limits = load_limits()
+    placed = {
+        D1: [bet(t11, "WIN", "4", 1_000, pick, "a"), bet(k5, "WIN", "8", 1_000, other, "b")],
+        D2: [bet(n2, "WIN", "1", 500, None, "c")],
+    }
+    for day, bets in placed.items():
+        log = BetLog(bet_log_path(day), day=day, limits=limits)
+        for b in bets:
+            log.record(b)
+    build = paths.processed_dir("jra") / "_build.json"
+    build.parent.mkdir(parents=True)
+    build.write_text(json.dumps({"snapshot_id": "synthetic-1"}), encoding="utf-8")
+
+    class Clock(datetime):  # each call a minute later: no two invocations share written_utc
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return datetime(2026, 11, 28, 9, 0, tzinfo=UTC) + timedelta(minutes=cls.calls)
+
+    monkeypatch.setattr(shadow_run, "read_shadow", lambda days: pd.DataFrame(records))
+    monkeypatch.setattr(shadow_run, "day_dividends", lambda day: dividends(paid.get(day, [])))
+    monkeypatch.setattr(shadow_run, "final_win_odds", lambda days: dict(finals))
+    monkeypatch.setattr(shadow_run, "_git_sha", lambda: "0123abc" + "0" * 33)
+    monkeypatch.setattr(shadow_run, "datetime", Clock)
+    registry = default_registry("japan")
+    registry.append(other_family_record())
+    shadow_run.freeze()
+    assert not registry.records(shadow_run.FAMILY_ID), "no record of the study's family yet"
+    out = (tmp_path / "out").resolve()
+    out.mkdir()
+
+    def board_now() -> tuple[tuple[int, int], dict[str, int | None]]:
+        """A fresh read of the registry's leaderboard: (rows, measured rows), each option's rank."""
+        rows = rows_from_registry(default_registry("japan"))
+        ranks = {r.row.option_id: r.rank for r in rank(shrink(rows))}
+        return (len(rows), sum(row.measured for row in rows)), ranks
+
+    def stated(payload: dict) -> tuple[tuple[int, int], dict[tuple[str, str], int | None]]:
+        counts = payload["counts"]
+        ranks = {
+            (day_text(r["day"]), r["option_id"]): None if null(r["rank"]) else int(r["rank"])
+            for r in payload["bets_by_day"]
+        }
+        return (counts["leaderboard_rows"], counts["leaderboard_measured"]), ranks
+
+    def check(name: str, got: dict) -> None:
+        """The run's returned payload and the report at its path state the leaderboard as it is
+        after the run: its own records included."""
+        counts, ranks = board_now()
+        assert isinstance(ranks.get(pick), int), f"the pick option is not ranked: {ranks}"
+        played = {
+            (D1.isoformat(), pick): ranks[pick],
+            (D1.isoformat(), other): ranks[other],
+            (D2.isoformat(), "off-board"): None,
+        }
+        report = json.loads(Path(got["report_path"]).read_text(encoding="utf-8"))
+        for where, payload in (("returned", got), (f"report {got['report_path']}", report)):
+            assert stated(payload) == (counts, played), (
+                f"{name}: {where} states the leaderboard before the run's own records "
+                f"(counts and played ranks {stated(payload)}, the board after the run "
+                f"{(counts, played)})"
+            )
+
+    first = shadow_run.run_study(out_dir=out)
+    appended = registry.records(shadow_run.FAMILY_ID)
+    assert len(first["records_appended"]) == len(first["variants"]) == len(appended)
+    # By hand: one row per variant of the study (the pick rule's measured) and the other family's.
+    assert board_now()[0] == (len(first["variants"]) + 1, 2), "the board after the first run"
+    check("the first run", first)
+    written = files_of(out)
+    assert sorted(Path(p).name for p in first["written"]) == sorted(written), "the first run wrote"
+    assert Path(first["report_path"]).name in written
+    assert Path(first["settlement"]["path"]).name in written
+    chain = registry.path.read_bytes()
+
+    # The same inputs again: only what the call itself adds differs, so the rerun has the first
+    # run's id and path, writes nothing and appends nothing.
+    again = shadow_run.run_study(out_dir=out)
+    assert again["written_utc"] != first["written_utc"], "the fake clock moved between the runs"
+    assert again["run_ids"] == first["run_ids"], "the rerun's registry records moved"
+    assert again["records_appended"] == [], "an identical rerun appended a record"
+    assert registry.path.read_bytes() == chain, "an identical rerun changed the registry"
+    assert again["artifact_id"] == first["artifact_id"], (
+        "an identical rerun has another artifact id: the first run's report did not state the "
+        "board its own records made"
+    )
+    assert again["report_path"] == first["report_path"]
+    assert again["written"] == [], "an identical rerun wrote a file"
+    assert files_of(out) == written, "an identical rerun replaced or added a file"
+    check("the rerun", again)
 
 
 # ---------------------------------------------------------------- no code places a bet

@@ -36,10 +36,12 @@ appears here.
   leaderboard's rows and measured rows, the primary estimate, the variants, the pick growth, the
   hand-played bets by day with each option's leaderboard rank, the day stakes and the settlement
   file's shape. Hashing the counts and ranks landed after review round 3, so two runs at one
-  commit beside different leaderboards never share an id. A new commit, a rebuilt input, a
-  changed result or another leaderboard writes new files beside the old ones, and no existing
-  file is replaced: a rerun that reproduces a run's results keeps that run's report and
-  settlement file as written.
+  commit beside different leaderboards never share an id. The counts and ranks are those of the
+  leaderboard read after the run's own records are appended, so the first identical rerun, which
+  appends nothing, states the same board. A new commit, a rebuilt input, a changed result or a
+  change in the reported leaderboard counts or played-option ranks writes new files beside the
+  old ones, and no existing file is replaced: a rerun that reproduces a run's results keeps that
+  run's report and settlement file as written.
   A report lists its run's `run_ids` and the `records_appended` by the invocation that wrote it.
   A rerun at another commit is a new run, with twelve new records.
 - Data: the shadow logs of 2026-11-21 and 2026-11-22 (Kyoto), both development days, sealed:
